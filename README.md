@@ -11,5 +11,5 @@ See the [changelog][Changelog] in RTXGI v2.0 SDK for the latest SHARC changes.
 
 [SharcIntegrationGuide]: ./docs/Integration.md
 [RTXGI2]: https://github.com/NVIDIAGameWorks/RTXGI/tree/main
-[Changelog]: https://github.com/NVIDIAGameWorks/RTXGI/blob/main/CHANGELOG.md
+[Changelog]: https://github.com/NVIDIAGameWorks/RTXGI/blob/main/Changelog.md
 
