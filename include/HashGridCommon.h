@@ -74,6 +74,7 @@ uint HashGridHashJenkins32(uint a)
     a = (a + 0xd3a2646c) ^ (a << 9);
     a = (a + 0xfd7046c5) + (a << 3);
     a = (a ^ 0xb55a4f09) ^ (a >> 16);
+
     return a;
 }
 
@@ -197,12 +198,11 @@ bool HashMapInsert(in HashMapData hashMapData, const HashGridKey hashKey, out Ha
 {
     uint hash       = HashGridHash32(hashKey);
     uint slot       = hash % hashMapData.capacity;
-    uint initSlot   = slot;
-    HashGridKey prevHashGridKey = HASH_GRID_INVALID_HASH_KEY;
 
     const uint baseSlot = HashGridGetBaseSlot(slot, hashMapData.capacity);
     for (uint bucketOffset = 0; bucketOffset < HASH_GRID_HASH_MAP_BUCKET_SIZE; ++bucketOffset)
     {
+        HashGridKey prevHashGridKey;
         HashMapAtomicCompareExchange(hashMapData, baseSlot + bucketOffset, HASH_GRID_INVALID_HASH_KEY, hashKey, prevHashGridKey);
 
         if (prevHashGridKey == HASH_GRID_INVALID_HASH_KEY || prevHashGridKey == hashKey)

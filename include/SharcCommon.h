@@ -11,7 +11,7 @@
 // Version
 #define SHARC_VERSION_MAJOR                     1
 #define SHARC_VERSION_MINOR                     4
-#define SHARC_VERSION_BUILD                     3
+#define SHARC_VERSION_BUILD                     4
 #define SHARC_VERSION_REVISION                  0
 
 // Constants
@@ -524,7 +524,7 @@ void SharcResolveEntry(uint entryIndex, SharcParameters sharcParameters, SharcRe
     {
         uint writeOffset = 0;
 #if !SHARC_DEFERRED_HASH_COMPACTION
-        hashMapData.hashEntriesBuffer[entryIndex] = HASH_GRID_INVALID_HASH_KEY;
+        sharcParameters.hashMapData.hashEntriesBuffer[entryIndex] = HASH_GRID_INVALID_HASH_KEY;
 #endif // !SHARC_DEFERRED_HASH_COMPACTION
 
         BUFFER_AT_OFFSET(sharcParameters.voxelDataBuffer, entryIndex) = uint4(0, 0, 0, 0);
@@ -540,7 +540,7 @@ void SharcResolveEntry(uint entryIndex, SharcParameters sharcParameters, SharcRe
                     {
                         writeOffset += HashGridGetBaseSlot(entryIndex, sharcParameters.hashMapData.capacity);
 #if !SHARC_DEFERRED_HASH_COMPACTION
-                        hashMapData.hashEntriesBuffer[writeOffset] = hashKey;
+                        sharcParameters.hashMapData.hashEntriesBuffer[writeOffset] = hashKey;
 #endif // !SHARC_DEFERRED_HASH_COMPACTION
 
                         BUFFER_AT_OFFSET(sharcParameters.voxelDataBuffer, writeOffset) = packedData;
