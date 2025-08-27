@@ -10,8 +10,8 @@
 
 // Version
 #define SHARC_VERSION_MAJOR                     1
-#define SHARC_VERSION_MINOR                     4
-#define SHARC_VERSION_BUILD                     4
+#define SHARC_VERSION_MINOR                     5
+#define SHARC_VERSION_BUILD                     1
 #define SHARC_VERSION_REVISION                  0
 
 // Constants
@@ -26,9 +26,7 @@
 #define SHARC_STALE_FRAME_NUM_BIT_MASK          ((1u << SHARC_STALE_FRAME_NUM_BIT_NUM) - 1)
 #define SHARC_GRID_LOGARITHM_BASE               2.0f
 #define SHARC_GRID_LEVEL_BIAS                   0       // positive bias adds extra levels with content magnification (can be negative as well)
-#define SHARC_ENABLE_COMPACTION                 HASH_GRID_ALLOW_COMPACTION
 #define SHARC_BLEND_ADJACENT_LEVELS             1       // combine the data from adjacent levels on camera movement
-#define SHARC_DEFERRED_HASH_COMPACTION          (SHARC_ENABLE_COMPACTION && SHARC_BLEND_ADJACENT_LEVELS)
 #define SHARC_NORMALIZED_SAMPLE_NUM             (1u << (SHARC_SAMPLE_NUM_BIT_NUM - 1))
 #define SHARC_ACCUMULATED_FRAME_NUM_MIN         1       // minimum number of frames to use for data accumulation
 #define SHARC_ACCUMULATED_FRAME_NUM_MAX         SHARC_ACCUMULATED_FRAME_NUM_BIT_MASK // maximum number of frames to use for data accumulation
@@ -44,11 +42,11 @@
 #endif
 
 #ifndef SHARC_SEPARATE_EMISSIVE
-#define SHARC_SEPARATE_EMISSIVE                 0       // if set, emissive values should be passed separately on updates and added to the cache query
+#define SHARC_SEPARATE_EMISSIVE                 0       // if enabled, emissive values must be provided separately during updates. For cache queries, you can either supply them directly or include them in the query result
 #endif
 
-#ifndef SHARC_INCLUDE_DIRECT_LIGHTING
-#define SHARC_INCLUDE_DIRECT_LIGHTING           1       // if set cache values include both direct and indirect lighting
+#ifndef SHARC_MATERIAL_DEMODULATION
+#define SHARC_MATERIAL_DEMODULATION             0       // enable material demodulation to preserve material details
 #endif
 
 #ifndef SHARC_PROPOGATION_DEPTH
@@ -137,9 +135,12 @@ struct SharcState
 struct SharcHitData
 {
     float3 positionWorld;
-    float3 normalWorld;
+    float3 normalWorld;             // geometry normal in world space. Shading or object-space normals should work, but are not generally recommended
+#if SHARC_MATERIAL_DEMODULATION
+    float3 materialDemodulation;    // demodulation factor used to preserve material details. Use > 0 when active; set to float3(1.0f, 1.0f, 1.0f) when unused
+#endif // SHARC_MATERIAL_DEMODULATION
 #if SHARC_SEPARATE_EMISSIVE
-    float3 emissive;
+    float3 emissive;                // separate emissive improves behavior with dynamic lighting. Requires computing material emissive on each(even cached) hit
 #endif // SHARC_SEPARATE_EMISSIVE
 };
 
@@ -255,10 +256,7 @@ void SharcUpdateMiss(in SharcParameters sharcParameters, in SharcState sharcStat
 {
 #if SHARC_UPDATE
     for (int i = 0; i < sharcState.pathLength; ++i)
-    {
         SharcAddVoxelData(sharcParameters, sharcState.cacheIndices[i], radiance, sharcState.sampleWeights[i], 0);
-        radiance *= sharcState.sampleWeights[i];
-    }
 #endif // SHARC_UPDATE
 }
 
@@ -278,9 +276,9 @@ bool SharcUpdateHit(in SharcParameters sharcParameters, inout SharcState sharcSt
         if (voxelData.accumulatedSampleNum > SHARC_SAMPLE_NUM_THRESHOLD)
         {
             sharcRadiance = SharcResolveAccumulatedRadiance(voxelData.accumulatedRadiance, voxelData.accumulatedSampleNum);
-#if !SHARC_INCLUDE_DIRECT_LIGHTING
-            sharcRadiance += directLighting;
-#endif // !SHARC_INCLUDE_DIRECT_LIGHTING
+#if SHARC_MATERIAL_DEMODULATION
+            sharcRadiance *= sharcHitData.materialDemodulation;
+#endif // SHARC_MATERIAL_DEMODULATION
             continueTracing = false;
         }
     }
@@ -288,11 +286,11 @@ bool SharcUpdateHit(in SharcParameters sharcParameters, inout SharcState sharcSt
 
     if (continueTracing)
     {
-#if SHARC_INCLUDE_DIRECT_LIGHTING
+#if SHARC_MATERIAL_DEMODULATION
+        SharcAddVoxelData(sharcParameters, cacheIndex, directLighting / sharcHitData.materialDemodulation, float3(1.0f, 1.0f, 1.0f), 1);
+#else // !SHARC_MATERIAL_DEMODULATION
         SharcAddVoxelData(sharcParameters, cacheIndex, directLighting, float3(1.0f, 1.0f, 1.0f), 1);
-#else // !SHARC_INCLUDE_DIRECT_LIGHTING
-        SharcAddVoxelData(sharcParameters, cacheIndex, float3(0.0f, 0.0f, 0.0f), float3(0.0f, 0.0f, 0.0f), 1);
-#endif // !SHARC_INCLUDE_DIRECT_LIGHTING
+#endif // !SHARC_MATERIAL_DEMODULATION
     }
 
 #if SHARC_SEPARATE_EMISSIVE
@@ -301,10 +299,7 @@ bool SharcUpdateHit(in SharcParameters sharcParameters, inout SharcState sharcSt
 
     uint i;
     for (i = 0; i < sharcState.pathLength; ++i)
-    {
         SharcAddVoxelData(sharcParameters, sharcState.cacheIndices[i], sharcRadiance, sharcState.sampleWeights[i], 0);
-        sharcRadiance *= sharcState.sampleWeights[i];
-    }
 
     for (i = sharcState.pathLength; i > 0; --i)
     {
@@ -313,6 +308,10 @@ bool SharcUpdateHit(in SharcParameters sharcParameters, inout SharcState sharcSt
     }
 
     sharcState.cacheIndices[0] = cacheIndex;
+    sharcState.sampleWeights[0] = 1.0f;
+#if SHARC_MATERIAL_DEMODULATION
+    sharcState.sampleWeights[0] = 1.0f / sharcHitData.materialDemodulation;
+#endif // SHARC_MATERIAL_DEMODULATION
     sharcState.pathLength = min(++sharcState.pathLength, SHARC_PROPOGATION_DEPTH - 1);
 #endif // SHARC_UPDATE
     return continueTracing;
@@ -321,7 +320,8 @@ bool SharcUpdateHit(in SharcParameters sharcParameters, inout SharcState sharcSt
 void SharcSetThroughput(inout SharcState sharcState, float3 throughput)
 {
 #if SHARC_UPDATE
-    sharcState.sampleWeights[0] = throughput;
+    for (uint i = 0; i < sharcState.pathLength; ++i)
+        sharcState.sampleWeights[i] *= throughput;
 #endif // SHARC_UPDATE
 }
 
@@ -338,7 +338,9 @@ bool SharcGetCachedRadiance(in SharcParameters sharcParameters, in SharcHitData 
     if (voxelData.accumulatedSampleNum > sampleThreshold)
     {
         radiance = SharcResolveAccumulatedRadiance(voxelData.accumulatedRadiance, voxelData.accumulatedSampleNum);
-
+#if SHARC_MATERIAL_DEMODULATION
+        radiance *= sharcHitData.materialDemodulation;
+#endif // SHARC_MATERIAL_DEMODULATION
 #if SHARC_SEPARATE_EMISSIVE
         radiance += sharcHitData.emissive;
 #endif // SHARC_SEPARATE_EMISSIVE
@@ -347,31 +349,6 @@ bool SharcGetCachedRadiance(in SharcParameters sharcParameters, in SharcHitData 
     }
 
     return false;
-}
-
-void SharcCopyHashEntry(uint entryIndex, HashMapData hashMapData, RW_STRUCTURED_BUFFER(copyOffsetBuffer, uint))
-{
-#if SHARC_DEFERRED_HASH_COMPACTION
-    if (entryIndex >= hashMapData.capacity)
-        return;
-
-    uint copyOffset = BUFFER_AT_OFFSET(copyOffsetBuffer, entryIndex);
-    if (copyOffset == 0)
-        return;
-
-    if (copyOffset == HASH_GRID_INVALID_CACHE_INDEX)
-    {
-        BUFFER_AT_OFFSET(hashMapData.hashEntriesBuffer, entryIndex) = HASH_GRID_INVALID_HASH_KEY;
-    }
-    else if (copyOffset != 0)
-    {
-        HashGridKey hashKey = BUFFER_AT_OFFSET(hashMapData.hashEntriesBuffer, entryIndex);
-        BUFFER_AT_OFFSET(hashMapData.hashEntriesBuffer, entryIndex) = HASH_GRID_INVALID_HASH_KEY;
-        BUFFER_AT_OFFSET(hashMapData.hashEntriesBuffer, copyOffset) = hashKey;
-    }
-
-    BUFFER_AT_OFFSET(copyOffsetBuffer, entryIndex) = 0;
-#endif // SHARC_DEFERRED_HASH_COMPACTION
 }
 
 int SharcGetGridDistance2(int3 position)
@@ -428,11 +405,7 @@ HashGridKey SharcGetAdjacentLevelHashKey(HashGridKey hashKey, HashGridParameters
     return modifiedHashGridKey;
 }
 
-void SharcResolveEntry(uint entryIndex, SharcParameters sharcParameters, SharcResolveParameters resolveParameters
-#if SHARC_DEFERRED_HASH_COMPACTION
-    , RW_STRUCTURED_BUFFER(copyOffsetBuffer, uint)
-#endif // SHARC_DEFERRED_HASH_COMPACTION
-)
+void SharcResolveEntry(uint entryIndex, SharcParameters sharcParameters, SharcResolveParameters resolveParameters)
 {
     if (entryIndex >= sharcParameters.hashMapData.capacity)
         return;
@@ -463,7 +436,8 @@ void SharcResolveEntry(uint entryIndex, SharcParameters sharcParameters, SharcRe
         HashGridKey adjacentLevelHashKey = SharcGetAdjacentLevelHashKey(hashKey, sharcParameters.gridParameters, resolveParameters.cameraPositionPrev);
 
         HashGridIndex cacheIndex = HASH_GRID_INVALID_CACHE_INDEX;
-        if (HashMapFind(sharcParameters.hashMapData, adjacentLevelHashKey, cacheIndex))
+        uint hashCollisionsNum;
+        if (HashMapFind(sharcParameters.hashMapData, adjacentLevelHashKey, cacheIndex, hashCollisionsNum))
         {
             uint4 adjacentPackedDataPrev = BUFFER_AT_OFFSET(sharcParameters.voxelDataBufferPrev, cacheIndex);
             uint adjacentSampleNum = SharcGetSampleNum(adjacentPackedDataPrev.w);
@@ -509,57 +483,9 @@ void SharcResolveEntry(uint entryIndex, SharcParameters sharcParameters, SharcRe
     if (!isValidElement)
     {
         packedData = uint4(0, 0, 0, 0);
-#if !SHARC_ENABLE_COMPACTION
         BUFFER_AT_OFFSET(sharcParameters.hashMapData.hashEntriesBuffer, entryIndex) = HASH_GRID_INVALID_HASH_KEY;
-#endif // !SHARC_ENABLE_COMPACTION
     }
 
-#if SHARC_ENABLE_COMPACTION
-    uint validElementNum = WaveActiveCountBits(isValidElement);
-    uint validElementMask = WaveActiveBallot(isValidElement).x;
-    bool isMovableElement = isValidElement && ((entryIndex % HASH_GRID_HASH_MAP_BUCKET_SIZE) >= validElementNum);
-    uint movableElementIndex = WavePrefixCountBits(isMovableElement);
-
-    if ((entryIndex % HASH_GRID_HASH_MAP_BUCKET_SIZE) >= validElementNum)
-    {
-        uint writeOffset = 0;
-#if !SHARC_DEFERRED_HASH_COMPACTION
-        sharcParameters.hashMapData.hashEntriesBuffer[entryIndex] = HASH_GRID_INVALID_HASH_KEY;
-#endif // !SHARC_DEFERRED_HASH_COMPACTION
-
-        BUFFER_AT_OFFSET(sharcParameters.voxelDataBuffer, entryIndex) = uint4(0, 0, 0, 0);
-
-        if (isValidElement)
-        {
-            uint emptySlotIndex = 0;
-            while (emptySlotIndex < validElementNum)
-            {
-                if (((validElementMask >> writeOffset) & 0x1) == 0)
-                {
-                    if (emptySlotIndex == movableElementIndex)
-                    {
-                        writeOffset += HashGridGetBaseSlot(entryIndex, sharcParameters.hashMapData.capacity);
-#if !SHARC_DEFERRED_HASH_COMPACTION
-                        sharcParameters.hashMapData.hashEntriesBuffer[writeOffset] = hashKey;
-#endif // !SHARC_DEFERRED_HASH_COMPACTION
-
-                        BUFFER_AT_OFFSET(sharcParameters.voxelDataBuffer, writeOffset) = packedData;
-                        break;
-                    }
-
-                    ++emptySlotIndex;
-                }
-
-                ++writeOffset;
-            }
-        }
-
-#if SHARC_DEFERRED_HASH_COMPACTION
-        BUFFER_AT_OFFSET(copyOffsetBuffer, entryIndex) = (writeOffset != 0) ? writeOffset : HASH_GRID_INVALID_CACHE_INDEX;
-#endif // SHARC_DEFERRED_HASH_COMPACTION
-    }
-    else if (isValidElement)
-#endif // SHARC_ENABLE_COMPACTION
     {
         BUFFER_AT_OFFSET(sharcParameters.voxelDataBuffer, entryIndex) = packedData;
     }

@@ -15,17 +15,14 @@
 #define HASH_GRID_LEVEL_BIT_MASK            ((1u << HASH_GRID_LEVEL_BIT_NUM) - 1)
 #define HASH_GRID_NORMAL_BIT_NUM            3
 #define HASH_GRID_NORMAL_BIT_MASK           ((1u << HASH_GRID_NORMAL_BIT_NUM) - 1)
-#define HASH_GRID_HASH_MAP_BUCKET_SIZE      32
+#define HASH_GRID_HASH_MAP_BUCKET_SIZE      16
+#define HASH_GRID_HASH_MAP_SEARCH_WINDOW    4
 #define HASH_GRID_INVALID_HASH_KEY          0
 #define HASH_GRID_INVALID_CACHE_INDEX       0xFFFFFFFF
 
 // Tweakable parameters
 #ifndef HASH_GRID_USE_NORMALS
 #define HASH_GRID_USE_NORMALS               1       // account for the normal data in the hash key
-#endif
-
-#ifndef HASH_GRID_ALLOW_COMPACTION
-#define HASH_GRID_ALLOW_COMPACTION          (HASH_GRID_HASH_MAP_BUCKET_SIZE == 32)
 #endif
 
 #ifndef HASH_GRID_POSITION_OFFSET
@@ -56,15 +53,6 @@ float HashGridLogBase(float x, float base)
     return log(x) / log(base);
 }
 
-uint HashGridGetBaseSlot(uint slot, uint capacity)
-{
-#if HASH_GRID_ALLOW_COMPACTION
-    return (slot / HASH_GRID_HASH_MAP_BUCKET_SIZE) * HASH_GRID_HASH_MAP_BUCKET_SIZE;
-#else // !HASH_GRID_ALLOW_COMPACTION
-    return min(slot, capacity - HASH_GRID_HASH_MAP_BUCKET_SIZE);
-#endif // !HASH_GRID_ALLOW_COMPACTION
-}
-
 // http://burtleburtle.net/bob/hash/integer.html
 uint HashGridHashJenkins32(uint a)
 {
@@ -81,6 +69,14 @@ uint HashGridHashJenkins32(uint a)
 uint HashGridHash32(HashGridKey hashKey)
 {
     return HashGridHashJenkins32(uint((hashKey >> 0) & 0xFFFFFFFF)) ^ HashGridHashJenkins32(uint((hashKey >> 32) & 0xFFFFFFFF));
+}
+
+uint HashGridGetBaseSlot(const HashGridKey hashKey, uint capacity)
+{
+    uint hash = HashGridHash32(hashKey);
+    uint slot = hash % capacity;
+
+    return min(slot, capacity - HASH_GRID_HASH_MAP_BUCKET_SIZE);
 }
 
 uint HashGridGetLevel(float3 samplePosition, HashGridParameters gridParameters)
@@ -196,10 +192,7 @@ void HashMapAtomicCompareExchange(in HashMapData hashMapData, in uint dstOffset,
 
 bool HashMapInsert(in HashMapData hashMapData, const HashGridKey hashKey, out HashGridIndex cacheIndex)
 {
-    uint hash       = HashGridHash32(hashKey);
-    uint slot       = hash % hashMapData.capacity;
-
-    const uint baseSlot = HashGridGetBaseSlot(slot, hashMapData.capacity);
+    const uint baseSlot = HashGridGetBaseSlot(hashKey, hashMapData.capacity);
     for (uint bucketOffset = 0; bucketOffset < HASH_GRID_HASH_MAP_BUCKET_SIZE; ++bucketOffset)
     {
         HashGridKey prevHashGridKey;
@@ -212,18 +205,15 @@ bool HashMapInsert(in HashMapData hashMapData, const HashGridKey hashKey, out Ha
         }
     }
 
-    cacheIndex = 0;
+    cacheIndex = hashMapData.capacity - 1;
 
     return false;
 }
 
-bool HashMapFind(in HashMapData hashMapData, const HashGridKey hashKey, inout HashGridIndex cacheIndex)
+bool HashMapFind(in HashMapData hashMapData, const HashGridKey hashKey, inout HashGridIndex cacheIndex, out uint bucketOffset)
 {
-    uint hash = HashGridHash32(hashKey);
-    uint slot = hash % hashMapData.capacity;
-
-    const uint baseSlot = HashGridGetBaseSlot(slot, hashMapData.capacity);
-    for (uint bucketOffset = 0; bucketOffset < HASH_GRID_HASH_MAP_BUCKET_SIZE; ++bucketOffset)
+    const uint baseSlot = HashGridGetBaseSlot(hashKey, hashMapData.capacity);
+    for (bucketOffset = 0; bucketOffset < HASH_GRID_HASH_MAP_BUCKET_SIZE; ++bucketOffset)
     {
         HashGridKey storedHashKey = BUFFER_AT_OFFSET(hashMapData.hashEntriesBuffer, baseSlot + bucketOffset);
 
@@ -232,12 +222,6 @@ bool HashMapFind(in HashMapData hashMapData, const HashGridKey hashKey, inout Ha
             cacheIndex = baseSlot + bucketOffset;
             return true;
         }
-#if HASH_GRID_ALLOW_COMPACTION
-        else if (storedHashKey == HASH_GRID_INVALID_HASH_KEY)
-        {
-            return false;
-        }
-#endif // HASH_GRID_ALLOW_COMPACTION
     }
 
     return false;
@@ -256,7 +240,8 @@ HashGridIndex HashMapFindEntry(in HashMapData hashMapData, float3 samplePosition
 {
     HashGridIndex cacheIndex    = HASH_GRID_INVALID_CACHE_INDEX;
     const HashGridKey hashKey   = HashGridComputeSpatialHash(samplePosition, sampleNormal, gridParameters);
-    bool successful             = HashMapFind(hashMapData, hashKey, cacheIndex);
+    uint hashCollisionsNum;
+    bool successful             = HashMapFind(hashMapData, hashKey, cacheIndex, hashCollisionsNum);
 
     return cacheIndex;
 }
@@ -273,9 +258,9 @@ float3 HashGridGetColorFromHash32(uint hash)
 }
 
 // Debug visualization
-float3 HashGridDebugColoredHash(float3 samplePosition, HashGridParameters gridParameters)
+float3 HashGridDebugColoredHash(float3 samplePosition, float3 sampleNormal, HashGridParameters gridParameters)
 {
-    HashGridKey hashKey     = HashGridComputeSpatialHash(samplePosition, float3(0, 0, 0), gridParameters);
+    HashGridKey hashKey     = HashGridComputeSpatialHash(samplePosition, sampleNormal, gridParameters);
     uint gridLevel          = HashGridGetLevel(samplePosition, gridParameters);
     float3 color            = HashGridGetColorFromHash32(HashGridHash32(hashKey)) * HashGridGetColorFromHash32(HashGridHashJenkins32(gridLevel)).xyz;
 
@@ -301,4 +286,30 @@ float3 HashGridDebugOccupancy(uint2 pixelPosition, uint2 screenSize, HashMapData
     }
 
     return float3(0.0f, 0.0f, 0.0f);
+}
+
+float3 HashGridDebugHashCollisions(float3 samplePosition, float3 sampleNormal, HashGridParameters gridParameters, HashMapData hashMapData)
+{
+    HashGridKey hashKey     = HashGridComputeSpatialHash(samplePosition, sampleNormal, gridParameters);
+    uint gridLevel          = HashGridGetLevel(samplePosition, gridParameters);
+
+    HashGridIndex cacheIndex = HASH_GRID_INVALID_CACHE_INDEX;
+    uint hashCollisionsNum;
+    HashMapFind(hashMapData, hashKey, cacheIndex, hashCollisionsNum);
+
+    float3 debugColor;
+    if (hashCollisionsNum == 0)
+        debugColor = float3(0.0f, 0.0f, 1.0f);
+    else if (hashCollisionsNum == 1)
+        debugColor = float3(0.0f, 0.5f, 0.5f);
+    else if (hashCollisionsNum == 2)
+        debugColor = float3(0.0f, 1.0f, 0.0f);
+    else if (hashCollisionsNum == 3)
+        debugColor = float3(1.0f, 1.0f, 0.0f);
+    else if (hashCollisionsNum == 4)
+        debugColor = float3(0.75f, 0.25f, 0.0f);
+    else
+        debugColor = float3(1.0f, 0.0f, 0.0f);
+
+    return debugColor;
 }

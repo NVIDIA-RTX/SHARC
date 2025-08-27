@@ -17,7 +17,6 @@ At Load-Time
 Create main resources:
 * `Hash entries` buffer - structured buffer with 64-bits entries to store the hashes
 * `Voxel data` buffer - structured buffer with 128-bit entries which stores accumulated radiance and sample count. Two instances are used to store current and previous frame data
-* `Copy offset` buffer - structured buffer with 32-bits per entry used for data compaction
 
 The number of entries in each buffer should be the same, it represents the number of scene voxels used for radiance caching. A solid baseline for most scenes can be the usage of $2^{22}$ elements. Commonly a power of 2 values are suggested. Higher element count can be used for scenes with high depth complexity, lower element count reduce memmory pressure, but can result in more hash collisions.
 
@@ -26,7 +25,7 @@ The number of entries in each buffer should be the same, it represents the numbe
 At Render-Time
 
 * **Populate cache data** using sparse tracing against the scene
-* **Combine old and new cache data**, perform data compaction
+* **Combine old and new cache data**
 * **Perform tracing** with early path termination using cached data
 
 ## Hash Grid Visualization
@@ -59,7 +58,6 @@ Instead of the original trace call, we should have the following four passes wit
 
 * SHaRC Update - RT call which updates the cache with the new data on each frame. Requires `SHARC_UPDATE 1` shader define
 * SHaRC Resolve - Compute call which combines new cache data with data obtained on the previous frame
-* SHaRC Compaction - Compute call to perform data compaction after previous resolve call
 * SHaRC Render/Query - RT call which traces scene paths and performs early termination using cached data. Requires `SHARC_QUERY 1` shader define
 
 ### Resource Binding
@@ -70,7 +68,6 @@ The SDK provides shader-side headers and code snippets that implement most of th
 |:-----------------|:----------------:|:--------------:|:-----------------------:|:---------------:|
 | SHaRC Update     |        RW        |       RW       |           Read          |       RW*       |
 | SHaRC Resolve    |       Read       |       RW       |           Read          |      Write      |
-| SHaRC Compaction |        RW        |                |                         |        RW       |
 | SHaRC Render     |       Read       |      Read      |                         |                 |
 
 *Read - resource can be read-only*  
@@ -91,9 +88,9 @@ This pass runs a full path tracer loop for a subset of screen pixels with some m
 <figcaption>Figure 1. Path tracer loop during SHaRC Update pass</figcaption>
 </figure>
 
-### SHaRC Resolve and Compaction
+### SHaRC Resolve
 
-`Resolve` pass is performed using compute shader which runs `SharcResolveEntry()` for each element. `Compaction` pass uses `SharcCopyHashEntry()` call.
+`Resolve` pass is performed using compute shader which runs `SharcResolveEntry()` for each element.
 > :tip: Check [Resource Binding](#resource-binding) section for details on the required resources and their usage for each pass 
 
 `SharcResolveEntry()` takes maximum number of accumulated frames as an input parameter to control the quality and responsivness of the cached data. Larger values can increase the quality at increase response times. `staleFrameNumMax` parameter is used to control the lifetime of cached elements, it is used to control cache occupancy
