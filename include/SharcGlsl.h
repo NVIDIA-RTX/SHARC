@@ -33,6 +33,8 @@
 #define int4 ivec4
 
 #define lerp mix
+#define asfloat uintBitsToFloat
+#define asuint floatBitsToUint
 #define InterlockedAdd atomicAdd
 #define InterlockedCompareExchange atomicCompSwap
 #define WaveActiveCountBits(value) subgroupBallotBitCount(uint4(value, 0, 0, 0))

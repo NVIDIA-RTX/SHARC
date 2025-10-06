@@ -19,10 +19,11 @@ An implementation of SHaRC using the RTXGI SDK needs to perform the following st
 At Load-Time
 
 Create main resources:
-* `Hash entries` buffer - structured buffer with 64-bit entries that store the hashes
-* `Voxel data` buffer - structured buffer with 128-bit entries that store accumulated radiance and sample counts. Two instances are used to store current and previous frame data
+* `Hash entries` buffer - structured buffer with 8-byte entries that store the hashes
+* `Accumulation` buffer - structured buffer with 16-byte entries that store accumulated radiance and sample counts per frame
+* `Resolved` buffer - structured buffer with 16-byte entries holding cross-frame accumulated radiance, total samples, and some extra data used in 'Resolve' pass
 
-Both buffers should contain the same number of entries, representing the number of scene voxels used for radiance caching. A solid baseline for most scenes can be the usage of $2^{22}$ elements. It is recommended to use power-of-two values. A higher element count is recommended for scenes with high depth complexity. A lower element count reduces memory pressure but increases the risk of hash collisions.
+All buffers should contain the same number of entries, representing the number of scene voxels used for radiance caching. A solid baseline for most scenes can be the usage of $2^{22}$ elements. It is recommended to use power-of-two values. A higher element count is recommended for scenes with high depth complexity. A lower element count reduces memory pressure but increases the risk of hash collisions.
 
 > ⚠️ **Warning:** **All buffers should be initially cleared with '0'**
 
@@ -72,14 +73,14 @@ Instead of the original trace call, we should have the following four passes wit
 
 The SDK provides shader-side headers and code snippets that implement most of the steps above. Shader code should include [SharcCommon.h](../Shaders/Include/SharcCommon.h) which already includes [HashGridCommon.h](../Shaders/Include/HashGridCommon.h)
 
-| **Render Pass**  | **Hash Entries** | **Voxel Data** | **Voxel Data Previous** | **Copy Offset** |
-|:-----------------|:----------------:|:--------------:|:-----------------------:|:---------------:|
-| SHaRC Update     |        RW        |       RW       |           Read          |       RW*       |
-| SHaRC Resolve    |       Read       |       RW       |           Read          |                 |
-| SHaRC Render     |       Read       |      Read      |                         |                 |
+| **Render Pass**  | **Hash Entries** | **Accumulation** | **Resolved** | **Lock Buffer** |
+|:-----------------|:----------------:|:----------------:|:------------:|:---------------:|
+| SHaRC Update     |        RW        |       Write      |     Read     |       RW*       |
+| SHaRC Resolve    |       Read       |       Read       |      RW      |                 |
+| SHaRC Render     |       Read       |                  |     Read     |                 |
 
-*Read - resource can be read-only*  
-*Write - resource can be write-only*  
+*Read - resource can be read-only*
+*Write - resource can be write-only*
 
 *Buffer is used if SHARC_ENABLE_64_BIT_ATOMICS is set to 0
 
@@ -87,7 +88,7 @@ Each pass requires appropriate transition/UAV barriers to ensure the previous st
 
 ### SHaRC Update
 
-> ⚠️ **Warning:** Requires `SHARC_UPDATE 1` shader define. `Voxel Data` buffer should be cleared with `0` if `Resolve` pass is active
+> ⚠️ **Warning:** Requires `SHARC_UPDATE 1` shader define
 
 This pass runs a full path tracer loop for a subset of screen pixels with some modifications applied. We recommend starting with random pixel selection for each 5x5 block to process only 4% of the original paths per frame. This typically should result in a good data set for the cache update and have a small performance overhead at the same time. Positions should be different between frames, producing whole-screen coverage over time. Each path segment in the update step is treated independently. Path throughput should be reset to 1.0 and accumulated radiance to 0.0 on each bounce. For each new sample(path) we should first call `SharcInit()`. On a miss event `SharcUpdateMiss()` is called and the path gets terminated, for hit we should evaluate radiance at the hit point and then call `SharcUpdateHit()`. If `SharcUpdateHit()` call returns false, we can immediately terminate the path. Once a new ray has been selected we should update the path throughput and call `SharcSetThroughput()`, after that path throughput can be safely reset back to 1.0.
 
@@ -103,15 +104,15 @@ This pass runs a full path tracer loop for a subset of screen pixels with some m
 ### SHaRC Resolve
 
 `Resolve` pass is performed using compute shader which runs `SharcResolveEntry()` for each element.
-> 📝 **Note:** Check [Resource Binding](#resource-binding) section for details on the required resources and their usage for each pass 
+> 📝 **Note:** Check [Resource Binding](#resource-binding) section for details on the required resources and their usage for each pass.
 
 `SharcResolveEntry()` takes maximum number of accumulated frames as an input parameter to control the quality and responsiveness of the cached data. Larger values can increase quality but also increase response times. `staleFrameNumMax` parameter is used to control the lifetime of cached elements, it is used to control cache occupancy
 
-> ⚠️ **Warning:** Small `staleFrameNumMax` values can negatively impact performance, `SHARC_STALE_FRAME_NUM_MIN` constant is used to prevent such behavior
+> ⚠️ **Warning:** Small `staleFrameNumMax` values can negatively impact performance, `SHARC_STALE_FRAME_NUM_MIN` constant is used to prevent such behavior.
 
 ### SHaRC Render
 
-> ⚠️ **Warning:** Requires `SHARC_QUERY 1` shader define
+> ⚠️ **Warning:** Requires `SHARC_QUERY 1` shader define.
 
 During rendering with SHaRC cache usage we should try obtaining cached data using `SharcGetCachedRadiance()` on each hit except the primary hit if any. Upon success, the path tracing loop should be immediately terminated.
 
@@ -169,4 +170,4 @@ SHaRC radiance values are internally premultiplied with `SHARC_RADIANCE_SCALE` a
 
 ## Memory Usage
 
-```Hash entries``` buffer and two ```Voxel data``` buffers totally require 320 (64 + 128 * 2) bits per voxel. For $2^{22}$ cache elements this will require 160 MiBs of video memory. Total number of elements may vary depending on the voxel size and scene scale. Larger buffer sizes may be needed to reduce potential hash collisions.
+```Hash entries``` buffer and two ```Voxel data``` buffers totally require 40 (8 + 16 + 16) bytes per voxel. For $2^{22}$ cache elements this will require 160 MiBs of video memory. Total number of elements may vary depending on the voxel size and scene scale. Larger buffer sizes may be needed to reduce potential hash collisions.
