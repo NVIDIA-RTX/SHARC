@@ -13,12 +13,21 @@
 
 struct SharcAccumulationData
 {
+#if SHARC_ENABLE_SH_ENCODING
+    int4 data;
+    int4 dataExt;
+#else // !SHARC_ENABLE_SH_ENCODING
     uint4 data;
+#endif // SHARC_ENABLE_SH_ENCODING
 };
 
 struct SharcPackedData
 {
     float16_t4 radianceData;
+#if SHARC_ENABLE_SH_ENCODING
+    uint radianceDataExt;
+    uint sampleNumData;
+#endif // SHARC_ENABLE_SH_ENCODING
     uint sampleData;
     uint sampleDataExt;
 };

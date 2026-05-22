@@ -140,7 +140,7 @@ $$2.0 * ray.length * sqrt(0.5 * a^2 / (1 - a^2))$$
 
 where `a` is material roughness squared.
 
-## Responsive lighting
+## Responsive Lighting
 
 Responsive lighting mode is intended for light sources that require fast temporal response and may exist only for a short duration (e.g., flashlights or rapidly changing lights). In such cases, standard SHaRC accumulation may react too slowly, leading to visible lag in lighting updates.
 
@@ -149,6 +149,18 @@ This mode can be enabled by defining `SHARC_ENABLE_RESPONSIVE_LIGHTING 1`. Respo
 When responsive lighting is enabled, the Resolve pass no longer clears accumulation buffer entries. Instead, a full resource clear is required to ensure the accumulation buffer is reset to zero before the `Update` pass begins.
 
 Responsive signal processing introduces additional overhead and may reduce the benefits of long-term accumulation. It should only be enabled when the scene contains transient or rapidly changing light sources that require faster adaptation.
+
+## Directional Radiance Encoding
+
+Directional radiance encoding is intended for cases where cached radiance should preserve directionality for more accurate reconstruction. This is typically needed to avoid extra light coming from bright specular highlights being reconstructed in unrelated viewing directions.
+
+This mode can be enabled by defining `SHARC_ENABLE_SH_ENCODING 1`. When enabled, SHaRC stores additional directional radiance data and reconstructs cached radiance for the current query or update direction.
+
+When using directional radiance encoding, provide the radiance direction in `SharcHitData`. The direction should point from the hit location toward the previous path vertex. The directionality weight controls how strongly the cached signal depends on that direction: use `0` for diffuse radiance and values closer to `1` for sharp glossy or specular radiance. `SharcSetRadianceDirectionWeight()` should used to update this weight after a new direction is sampled.
+
+When directional radiance encoding is enabled, both accumulation and resolved buffer storage layouts change to store the extra directional data. Accumulation buffer entries must use a 32-byte stride and resolved buffer entries must use a 24-byte stride instead of the default 16-byte stride.
+
+Directional radiance encoding increases memory usage and accumulation cost. It should only be enabled when directional reconstruction improves quality, typically in scenes with intense specular highlights or sharp glossy paths.
 
 ## Parameters Selection and Debugging
 
@@ -190,4 +202,4 @@ During rendering, adding a debug heatmap of bounce count can help evaluate cache
 
 ## Memory Usage
 
-```Hash entries``` buffer and two ```Voxel data``` buffers totally require 40 (8 + 16 + 16) bytes per voxel. For $2^{22}$ cache elements this will require 160 MiBs of video memory. Total number of elements may vary depending on the voxel size and scene scale. Larger buffer sizes may be needed to reduce potential hash collisions.
+By default, ```Hash entries``` buffer and two ```Voxel data``` buffers totally require 40 (8 + 16 + 16) bytes per voxel. With `SHARC_ENABLE_SH_ENCODING 1`, accumulation and resolved buffer entries use 32 and 24 bytes respectively, increasing this to 64 (8 + 32 + 24) bytes per voxel. For $2^{22}$ cache elements this will require 160 MiBs of video memory with the default layout or 256 MiBs with directional radiance encoding. Total number of elements may vary depending on the voxel size and scene scale. Larger buffer sizes may be needed to reduce potential hash collisions.

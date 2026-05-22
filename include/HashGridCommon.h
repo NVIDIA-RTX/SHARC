@@ -58,7 +58,7 @@ static const uint HASH_GRID_(POSITION_BIT_NUM)      = 17;
 static const uint HASH_GRID_(LEVEL_BIT_NUM)         = 9;
 static const uint HASH_GRID_(NORMAL_BIT_NUM)        = 3;
 typedef uint64_t HashGrid_(Key);
-#endif // !HASH_GRID_COMPACT
+#endif // HASH_GRID_COMPACT
 
 static const uint HASH_GRID_(POSITION_BIT_MASK)     = (1u << HASH_GRID_(POSITION_BIT_NUM)) - 1;
 static const uint HASH_GRID_(LEVEL_BIT_MASK)        = (1u << HASH_GRID_(LEVEL_BIT_NUM)) - 1;
@@ -68,6 +68,10 @@ static const uint HASH_GRID_(LEVEL_BIT_OFFSET)      = HASH_GRID_(POSITION_BIT_NU
 static const uint HASH_GRID_(NORMAL_BIT_OFFSET)     = HASH_GRID_(LEVEL_BIT_OFFSET) + HASH_GRID_(LEVEL_BIT_NUM);
 
 // Tweakable parameters
+#ifndef HASH_GRID_ENABLE_64_BIT_ATOMICS
+#define HASH_GRID_ENABLE_64_BIT_ATOMICS     1       // use 64-bit atomics for hash key insertion; if not available, a lock buffer will be used for synchronization
+#endif
+
 #ifndef HASH_GRID_USE_NORMALS
 #define HASH_GRID_USE_NORMALS               1       // account for the normal data in the hash key
 #endif
@@ -116,7 +120,7 @@ uint HashGrid_(Hash32)(HashGrid_(Key) hashKey)
     return HashGrid_(HashJenkins32)(hashKey);
 #else // !HASH_GRID_COMPACT
     return HashGrid_(HashJenkins32)(uint((hashKey >> 0) & 0xFFFFFFFF)) ^ HashGrid_(HashJenkins32)(uint((hashKey >> 32) & 0xFFFFFFFF));
-#endif // !HASH_GRID_COMPACT
+#endif // HASH_GRID_COMPACT
 }
 
 // Computes the first slot for the probe bucket.
@@ -207,9 +211,9 @@ struct HashGrid_(Data)
 
     RW_STRUCTURED_BUFFER(hashEntriesBuffer, HashGrid_(Key));
 
-#if !HASH_GRID_ENABLE_64_BIT_ATOMICS
+#if !HASH_GRID_ENABLE_64_BIT_ATOMICS && !HASH_GRID_COMPACT
     RW_STRUCTURED_BUFFER(lockBuffer, uint);
-#endif // !HASH_GRID_ENABLE_64_BIT_ATOMICS
+#endif // !HASH_GRID_ENABLE_64_BIT_ATOMICS && !HASH_GRID_COMPACT
 };
 
 void HashGrid_(AtomicCompareExchange)(in HashGrid_(Data) hashData, in uint dstOffset, in HashGrid_(Key) compareValue, in HashGrid_(Key) value, out HashGrid_(Key) originalValue)
@@ -219,7 +223,7 @@ void HashGrid_(AtomicCompareExchange)(in HashGrid_(Data) hashData, in uint dstOf
     originalValue = InterlockedCompareExchange(BUFFER_AT_OFFSET(hashData.hashEntriesBuffer, dstOffset), compareValue, value);
 #else // !SHARC_ENABLE_GLSL
     InterlockedCompareExchange(BUFFER_AT_OFFSET(hashData.hashEntriesBuffer, dstOffset), compareValue, value, originalValue);
-#endif // !SHARC_ENABLE_GLSL
+#endif // SHARC_ENABLE_GLSL
 #else // !HASH_GRID_ENABLE_64_BIT_ATOMICS
     // ANY rearangments to the code below lead to device hang if fuse is unlimited
     const uint cLock = 0xAAAAAAAA;
@@ -242,7 +246,7 @@ void HashGrid_(AtomicCompareExchange)(in HashGrid_(Data) hashData, in uint dstOf
         }
         ++fuse;
     }
-#endif // !HASH_GRID_ENABLE_64_BIT_ATOMICS
+#endif // HASH_GRID_ENABLE_64_BIT_ATOMICS
 }
 
 bool HashGrid_(Insert)(in HashGrid_(Data) hashData, const HashGrid_(Key) hashKey, uint baseSlot, uint probeRange, inout HashGridIndex cacheIndex, out uint bucketOffset)

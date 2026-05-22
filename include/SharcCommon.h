@@ -10,8 +10,8 @@
 
 // Version
 #define SHARC_VERSION_MAJOR                     1
-#define SHARC_VERSION_MINOR                     7
-#define SHARC_VERSION_BUILD                     2
+#define SHARC_VERSION_MINOR                     8
+#define SHARC_VERSION_BUILD                     0
 #define SHARC_VERSION_REVISION                  0
 
 // SHaRC usage overview
@@ -76,6 +76,10 @@
 #define SHARC_MATERIAL_DEMODULATION             0       // enable material demodulation to preserve material details; requires sampling material data to reconstruct shading from cached values
 #endif
 
+#ifndef SHARC_ENABLE_SH_ENCODING
+#define SHARC_ENABLE_SH_ENCODING                0       // store resolved radiance as mixed YCoCg SH2 data: Y L0/L1 plus Co/Cg L0
+#endif
+
 #ifndef SHARC_LINEAR_PROBE_WINDOW_SIZE
 #define SHARC_LINEAR_PROBE_WINDOW_SIZE          8       // size of the linear search window for probe lookups
 #endif
@@ -118,10 +122,6 @@
 
 #ifndef SHARC_RESPONSIVE_ENTRY_PROBE_RANGE
 #define SHARC_RESPONSIVE_ENTRY_PROBE_RANGE      16      // maximum depth for responsive entry search, deeper search is not justified
-#endif
-
-#ifndef HASH_GRID_ENABLE_64_BIT_ATOMICS
-#define HASH_GRID_ENABLE_64_BIT_ATOMICS         1
 #endif
 
 #ifndef HASH_GRID_LIMIT_EMPTY_SLOTS
@@ -170,6 +170,10 @@ struct SharcState
 #if SHARC_UPDATE
     HashGridIndex cacheIndices[SHARC_PROPAGATION_DEPTH];
     SharcSampleWeight sampleWeights[SHARC_PROPAGATION_DEPTH];
+#if SHARC_ENABLE_SH_ENCODING
+    float3 radianceDirections[SHARC_PROPAGATION_DEPTH];
+    float radianceDirectionWeights[SHARC_PROPAGATION_DEPTH];
+#endif // SHARC_ENABLE_SH_ENCODING
     uint pathLength;
  #else // !SHARC_UPDATE
     uint placeholder;               // prevents empty-struct compilation issues with GLSL
@@ -180,6 +184,10 @@ struct SharcHitData
 {
     float3 positionWorld;
     float3 normalWorld;             // geometry normal in world space. Shading or object-space normals should work, but are not generally recommended
+#if SHARC_ENABLE_SH_ENCODING
+    float3 radianceDirectionWorld;  // normalized outgoing direction for cached radiance, pointing from the hit toward the previous path vertex
+    float radianceDirectionWeight;  // 0 for diffuse radiance, 1 for strongly directional glossy/specular radiance
+#endif // SHARC_ENABLE_SH_ENCODING
 #if SHARC_MATERIAL_DEMODULATION
     float3 materialDemodulation;    // demodulation factor used to preserve material details. Use > 0 when active; set to float3(1.0f, 1.0f, 1.0f) when unused
 #endif // SHARC_MATERIAL_DEMODULATION
@@ -188,9 +196,37 @@ struct SharcHitData
 #endif // SHARC_SEPARATE_EMISSIVE
 };
 
+struct SharcRadianceData
+{
+#if SHARC_ENABLE_SH_ENCODING
+    float4 luminanceSH;             // xyz - L1, w - L0
+    float2 chromaL0;                // Co/Cg L0 in YCoCg color space
+#else // !SHARC_ENABLE_SH_ENCODING
+    float3 radiance;
+#endif // SHARC_ENABLE_SH_ENCODING
+};
+
+float3 SharcGetRadianceDirection(SharcHitData sharcHitData)
+{
+#if SHARC_ENABLE_SH_ENCODING
+    return sharcHitData.radianceDirectionWorld;
+#else // !SHARC_ENABLE_SH_ENCODING
+    return float3(0.0f, 0.0f, 1.0f);
+#endif // SHARC_ENABLE_SH_ENCODING
+}
+
+float SharcGetRadianceDirectionWeight(SharcHitData sharcHitData)
+{
+#if SHARC_ENABLE_SH_ENCODING
+    return saturate(sharcHitData.radianceDirectionWeight);
+#else // !SHARC_ENABLE_SH_ENCODING
+    return 0.0f;
+#endif // SHARC_ENABLE_SH_ENCODING
+}
+
 struct SharcVoxelData
 {
-    float3 accumulatedRadiance;
+    SharcRadianceData accumulatedRadiance;
     float accumulatedSampleNum;
     uint accumulatedFrameNum;
     uint staleFrameNum;
@@ -206,16 +242,180 @@ struct SharcResolveParameters
     uint frameIndex;
 };
 
-SharcPackedData SharcPackVoxelData(float3 radiance, float sampleNum, uint accumulatedFrameNum, uint staleFrameNum, uint sampleDataExt)
+SharcRadianceData SharcZeroRadianceData()
+{
+    SharcRadianceData radianceData;
+#if SHARC_ENABLE_SH_ENCODING
+    radianceData.luminanceSH = float4(0, 0, 0, 0);
+    radianceData.chromaL0 = float2(0, 0);
+#else // !SHARC_ENABLE_SH_ENCODING
+    radianceData.radiance = float3(0, 0, 0);
+#endif // SHARC_ENABLE_SH_ENCODING
+
+    return radianceData;
+}
+
+SharcRadianceData SharcAddRadianceData(SharcRadianceData a, SharcRadianceData b)
+{
+    SharcRadianceData result;
+#if SHARC_ENABLE_SH_ENCODING
+    result.luminanceSH = a.luminanceSH + b.luminanceSH;
+    result.chromaL0 = a.chromaL0 + b.chromaL0;
+#else // !SHARC_ENABLE_SH_ENCODING
+    result.radiance = a.radiance + b.radiance;
+#endif // SHARC_ENABLE_SH_ENCODING
+
+    return result;
+}
+
+SharcRadianceData SharcScaleRadianceData(SharcRadianceData radianceData, float scale)
+{
+    SharcRadianceData result;
+#if SHARC_ENABLE_SH_ENCODING
+    result.luminanceSH = radianceData.luminanceSH * scale;
+    result.chromaL0 = radianceData.chromaL0 * scale;
+#else // !SHARC_ENABLE_SH_ENCODING
+    result.radiance = radianceData.radiance * scale;
+#endif // SHARC_ENABLE_SH_ENCODING
+
+    return result;
+}
+
+float3 SharcRGBToYCoCg(float3 color)
+{
+    return float3(0.25f * (color.x + 2.0f * color.y + color.z), color.x - color.z, color.y - 0.5f * (color.x + color.z));
+}
+
+float3 SharcYCoCgToRGB(float3 color)
+{
+    return float3(color.x + 0.5f * (color.y - color.z), color.x + 0.5f * color.z, color.x - 0.5f * (color.y + color.z));
+}
+
+SharcRadianceData SharcEncodeRadiance(float3 radiance, float3 radianceDirection, float radianceDirectionWeight)
+{
+    SharcRadianceData radianceData;
+#if SHARC_ENABLE_SH_ENCODING
+    float3 direction = normalize(radianceDirection);
+    float3 ycocg = SharcRGBToYCoCg(radiance);
+    radianceData.luminanceSH = float4(ycocg.x * direction * saturate(radianceDirectionWeight), ycocg.x);
+    radianceData.chromaL0 = ycocg.yz;
+#else // !SHARC_ENABLE_SH_ENCODING
+    radianceData.radiance = radiance;
+#endif // SHARC_ENABLE_SH_ENCODING
+
+    return radianceData;
+}
+
+float3 SharcDecodeRadiance(SharcRadianceData radianceData, float3 radianceDirection)
+{
+#if SHARC_ENABLE_SH_ENCODING
+    float3 direction = normalize(radianceDirection);
+    float directionalLuminance = min(length(radianceData.luminanceSH.xyz), max(radianceData.luminanceSH.w, 0.0f));
+    float diffuseLuminance = max(radianceData.luminanceSH.w - directionalLuminance, 0.0f);
+    float luminance = diffuseLuminance + max(dot(radianceData.luminanceSH.xyz, direction), 0.0f);
+    float chromaScale = (radianceData.luminanceSH.w > 1e-6f) ? (luminance / radianceData.luminanceSH.w) : 0.0f;
+    float2 chromaL0 = radianceData.chromaL0 * chromaScale;
+    return max(SharcYCoCgToRGB(float3(luminance, chromaL0.x, chromaL0.y)), float3(0.0f, 0.0f, 0.0f));
+#else // !SHARC_ENABLE_SH_ENCODING
+    return radianceData.radiance;
+#endif // SHARC_ENABLE_SH_ENCODING
+}
+
+uint SharcPackFloat16(float value)
+{
+    return f32tof16(value) & 0xFFFFu;
+}
+
+float SharcUnpackFloat16(uint value)
+{
+    return f16tof32(value & 0xFFFFu);
+}
+
+uint SharcPackFloat16Pair(float2 value)
+{
+    return SharcPackFloat16(value.x) | (SharcPackFloat16(value.y) << 16);
+}
+
+float2 SharcUnpackFloat16Pair(uint value)
+{
+    return float2(SharcUnpackFloat16(value), SharcUnpackFloat16(value >> 16));
+}
+
+float SharcClampFloat16(float value)
+{
+    const float float16Max = 65504.0f;
+    return clamp(value, -float16Max, float16Max);
+}
+
+SharcPackedData SharcZeroPackedData()
+{
+    SharcPackedData packedData;
+    packedData.radianceData = float16_t4(0, 0, 0, 0);
+#if SHARC_ENABLE_SH_ENCODING
+    packedData.radianceDataExt = 0;
+    packedData.sampleNumData = 0;
+#endif // SHARC_ENABLE_SH_ENCODING
+    packedData.sampleData = 0;
+    packedData.sampleDataExt = 0;
+
+    return packedData;
+}
+
+SharcAccumulationData SharcZeroAccumulationData()
+{
+    SharcAccumulationData accumulatedData;
+#if SHARC_ENABLE_SH_ENCODING
+    accumulatedData.data = int4(0, 0, 0, 0);
+    accumulatedData.dataExt = int4(0, 0, 0, 0);
+#else // !SHARC_ENABLE_SH_ENCODING
+    accumulatedData.data = uint4(0, 0, 0, 0);
+#endif // SHARC_ENABLE_SH_ENCODING
+
+    return accumulatedData;
+}
+
+float SharcGetAccumulatedSampleNum(SharcAccumulationData accumulatedData)
+{
+#if SHARC_ENABLE_SH_ENCODING
+    return float(accumulatedData.dataExt.z);
+#else // !SHARC_ENABLE_SH_ENCODING
+    return float(accumulatedData.data.w);
+#endif // SHARC_ENABLE_SH_ENCODING
+}
+
+SharcRadianceData SharcGetAccumulatedRadianceData(SharcAccumulationData accumulatedData, float radianceScale, float sampleNum)
+{
+    SharcRadianceData radianceData;
+    float scale = rcp(radianceScale * max(sampleNum, 1e-6f));
+#if SHARC_ENABLE_SH_ENCODING
+    radianceData.luminanceSH = float4(accumulatedData.data) * scale;
+    radianceData.chromaL0 = float2(accumulatedData.dataExt.xy) * scale;
+#else // !SHARC_ENABLE_SH_ENCODING
+    radianceData.radiance = float3(accumulatedData.data.xyz) * scale;
+#endif // SHARC_ENABLE_SH_ENCODING
+
+    return radianceData;
+}
+
+SharcPackedData SharcPackVoxelData(SharcRadianceData radianceData, float sampleNum, uint accumulatedFrameNum, uint staleFrameNum, uint sampleDataExt)
 {
     const float float16Max = 65504.0f;
 
     SharcPackedData packedData;
-    packedData.radianceData.x = float16_t(min(radiance.x, float16Max));
-    packedData.radianceData.y = float16_t(min(radiance.y, float16Max));
-    packedData.radianceData.z = float16_t(min(radiance.z, float16Max));
+#if SHARC_ENABLE_SH_ENCODING
+    packedData.radianceData.x = float16_t(SharcClampFloat16(radianceData.luminanceSH.x));
+    packedData.radianceData.y = float16_t(SharcClampFloat16(radianceData.luminanceSH.y));
+    packedData.radianceData.z = float16_t(SharcClampFloat16(radianceData.luminanceSH.z));
+    packedData.radianceData.w = float16_t(SharcClampFloat16(radianceData.luminanceSH.w));
+    packedData.radianceDataExt = SharcPackFloat16Pair(clamp(radianceData.chromaL0, float2(-float16Max, -float16Max), float2(float16Max, float16Max)));
+    packedData.sampleNumData = SharcPackFloat16(min(sampleNum, float16Max));
+#else // !SHARC_ENABLE_SH_ENCODING
+    packedData.radianceData.x = float16_t(min(radianceData.radiance.x, float16Max));
+    packedData.radianceData.y = float16_t(min(radianceData.radiance.y, float16Max));
+    packedData.radianceData.z = float16_t(min(radianceData.radiance.z, float16Max));
     packedData.radianceData.w = float16_t(min(sampleNum, float16Max));
-    packedData.sampleData.x = accumulatedFrameNum | (staleFrameNum << SHARC_STALE_FRAME_NUM_BIT_OFFSET);
+#endif // SHARC_ENABLE_SH_ENCODING
+    packedData.sampleData = accumulatedFrameNum | (staleFrameNum << SHARC_STALE_FRAME_NUM_BIT_OFFSET);
     packedData.sampleDataExt = sampleDataExt;
 
     return packedData;
@@ -224,10 +424,19 @@ SharcPackedData SharcPackVoxelData(float3 radiance, float sampleNum, uint accumu
 SharcVoxelData SharcUnpackVoxelData(SharcPackedData packedData)
 {
     SharcVoxelData voxelData;
-    voxelData.accumulatedRadiance.x = float(packedData.radianceData.x);
-    voxelData.accumulatedRadiance.y = float(packedData.radianceData.y);
-    voxelData.accumulatedRadiance.z = float(packedData.radianceData.z);
+#if SHARC_ENABLE_SH_ENCODING
+    voxelData.accumulatedRadiance.luminanceSH.x = float(packedData.radianceData.x);
+    voxelData.accumulatedRadiance.luminanceSH.y = float(packedData.radianceData.y);
+    voxelData.accumulatedRadiance.luminanceSH.z = float(packedData.radianceData.z);
+    voxelData.accumulatedRadiance.luminanceSH.w = float(packedData.radianceData.w);
+    voxelData.accumulatedRadiance.chromaL0 = SharcUnpackFloat16Pair(packedData.radianceDataExt);
+    voxelData.accumulatedSampleNum = SharcUnpackFloat16(packedData.sampleNumData);
+#else // !SHARC_ENABLE_SH_ENCODING
+    voxelData.accumulatedRadiance.radiance.x = float(packedData.radianceData.x);
+    voxelData.accumulatedRadiance.radiance.y = float(packedData.radianceData.y);
+    voxelData.accumulatedRadiance.radiance.z = float(packedData.radianceData.z);
     voxelData.accumulatedSampleNum = float(packedData.radianceData.w);
+#endif // SHARC_ENABLE_SH_ENCODING
     voxelData.accumulatedFrameNum = (packedData.sampleData >> SHARC_ACCUMULATED_FRAME_NUM_BIT_OFFSET) & SHARC_ACCUMULATED_FRAME_NUM_BIT_MASK;
     voxelData.staleFrameNum = (packedData.sampleData >> SHARC_STALE_FRAME_NUM_BIT_OFFSET) & SHARC_STALE_FRAME_NUM_BIT_MASK;
     voxelData.sampleDataExt = packedData.sampleDataExt;
@@ -247,10 +456,11 @@ SharcVoxelData SharcGetVoxelData(RW_STRUCTURED_BUFFER(voxelDataBuffer, SharcPack
     else
     {
         SharcVoxelData voxelData;
-        voxelData.accumulatedRadiance = float3(0, 0, 0);
+        voxelData.accumulatedRadiance = SharcZeroRadianceData();
         voxelData.accumulatedSampleNum = 0;
         voxelData.accumulatedFrameNum = 0;
         voxelData.staleFrameNum = 0;
+        voxelData.sampleDataExt = 0;
 
         return voxelData;
     }
@@ -263,16 +473,39 @@ float SharcLuma(float3 color)
     return dot(color, luma);
 }
 
-void SharcAddVoxelData(in SharcParameters sharcParameters, HashGridIndex hashGridIndex, float3 sampleValue, float3 sampleWeight, uint sampleData)
+float SharcRadianceLuma(SharcRadianceData radianceData)
+{
+#if SHARC_ENABLE_SH_ENCODING
+    return max(radianceData.luminanceSH.w, 0.0f);
+#else // !SHARC_ENABLE_SH_ENCODING
+    return SharcLuma(radianceData.radiance);
+#endif // SHARC_ENABLE_SH_ENCODING
+}
+
+void SharcAddVoxelData(in SharcParameters sharcParameters, HashGridIndex hashGridIndex, float3 sampleValue, float3 sampleWeight, float3 sampleDirection, float sampleDirectionWeight, uint sampleData)
 {
     if (hashGridIndex != HASH_GRID_INVALID_CACHE_INDEX)
     {
+#if SHARC_ENABLE_SH_ENCODING
+        SharcRadianceData scaledSample = SharcEncodeRadiance(sampleValue * sampleWeight, sampleDirection, sampleDirectionWeight);
+        int4 scaledLuminanceSH = int4(scaledSample.luminanceSH * sharcParameters.radianceScale);
+        int2 scaledChromaL0 = int2(scaledSample.chromaL0 * sharcParameters.radianceScale);
+
+        if (scaledLuminanceSH.x != 0) InterlockedAdd(BUFFER_AT_OFFSET(sharcParameters.accumulationBuffer, hashGridIndex).data.x, scaledLuminanceSH.x);
+        if (scaledLuminanceSH.y != 0) InterlockedAdd(BUFFER_AT_OFFSET(sharcParameters.accumulationBuffer, hashGridIndex).data.y, scaledLuminanceSH.y);
+        if (scaledLuminanceSH.z != 0) InterlockedAdd(BUFFER_AT_OFFSET(sharcParameters.accumulationBuffer, hashGridIndex).data.z, scaledLuminanceSH.z);
+        if (scaledLuminanceSH.w != 0) InterlockedAdd(BUFFER_AT_OFFSET(sharcParameters.accumulationBuffer, hashGridIndex).data.w, scaledLuminanceSH.w);
+        if (scaledChromaL0.x != 0) InterlockedAdd(BUFFER_AT_OFFSET(sharcParameters.accumulationBuffer, hashGridIndex).dataExt.x, scaledChromaL0.x);
+        if (scaledChromaL0.y != 0) InterlockedAdd(BUFFER_AT_OFFSET(sharcParameters.accumulationBuffer, hashGridIndex).dataExt.y, scaledChromaL0.y);
+        if (sampleData != 0) InterlockedAdd(BUFFER_AT_OFFSET(sharcParameters.accumulationBuffer, hashGridIndex).dataExt.z, int(sampleData));
+#else // !SHARC_ENABLE_SH_ENCODING
         uint3 scaledRadiance = uint3(sampleValue * sampleWeight * sharcParameters.radianceScale);
 
         if (scaledRadiance.x != 0) InterlockedAdd(BUFFER_AT_OFFSET(sharcParameters.accumulationBuffer, hashGridIndex).data.x, scaledRadiance.x);
         if (scaledRadiance.y != 0) InterlockedAdd(BUFFER_AT_OFFSET(sharcParameters.accumulationBuffer, hashGridIndex).data.y, scaledRadiance.y);
         if (scaledRadiance.z != 0) InterlockedAdd(BUFFER_AT_OFFSET(sharcParameters.accumulationBuffer, hashGridIndex).data.z, scaledRadiance.z);
         if (sampleData != 0) InterlockedAdd(BUFFER_AT_OFFSET(sharcParameters.accumulationBuffer, hashGridIndex).data.w, sampleData);
+#endif // SHARC_ENABLE_SH_ENCODING
     }
 }
 
@@ -338,7 +571,14 @@ void SharcUpdateMiss(in SharcParameters sharcParameters, in SharcState sharcStat
 
         hashGridIndex &= SHARC_CACHE_INDEX_BIT_MASK;
 #endif // SHARC_ENABLE_RESPONSIVE_LIGHTING
-        SharcAddVoxelData(sharcParameters, hashGridIndex, radiance, sharcState.sampleWeights[i], isNewSample ? 1 : 0);
+#if SHARC_ENABLE_SH_ENCODING
+        float3 radianceDirection = sharcState.radianceDirections[i];
+        float radianceDirectionWeight = sharcState.radianceDirectionWeights[i];
+#else // !SHARC_ENABLE_SH_ENCODING
+        float3 radianceDirection = float3(0.0f, 0.0f, 1.0f);
+        float radianceDirectionWeight = 0.0f;
+#endif // SHARC_ENABLE_SH_ENCODING
+        SharcAddVoxelData(sharcParameters, hashGridIndex, radiance, sharcState.sampleWeights[i], radianceDirection, radianceDirectionWeight, isNewSample ? 1 : 0);
     }
 #endif // SHARC_UPDATE
 }
@@ -368,6 +608,8 @@ bool SharcUpdateHit(in SharcParameters sharcParameters, inout SharcState sharcSt
 
     float3 sharcRadiance = directLighting;
     float3 materialDemodulation = float3(1.0f, 1.0f, 1.0f);
+    float3 sharcRadianceDirection = SharcGetRadianceDirection(sharcHitData);
+    float sharcRadianceDirectionWeight = SharcGetRadianceDirectionWeight(sharcHitData);
 #if SHARC_MATERIAL_DEMODULATION
     materialDemodulation = sharcHitData.materialDemodulation;
 #endif // SHARC_MATERIAL_DEMODULATION
@@ -379,13 +621,13 @@ bool SharcUpdateHit(in SharcParameters sharcParameters, inout SharcState sharcSt
         SharcVoxelData voxelData = SharcGetVoxelData(sharcParameters.resolvedBuffer, hashGridIndex);
         if (voxelData.accumulatedSampleNum > SHARC_SAMPLE_NUM_THRESHOLD)
         {
-            sharcRadiance = voxelData.accumulatedRadiance;
+            sharcRadiance = SharcDecodeRadiance(voxelData.accumulatedRadiance, sharcRadianceDirection);
 #if SHARC_ENABLE_RESPONSIVE_LIGHTING
             if (responsiveCacheIndex != HASH_GRID_INVALID_CACHE_INDEX)
             {
                 SharcVoxelData responsiveVoxelData = SharcGetVoxelData(sharcParameters.resolvedBuffer, responsiveCacheIndex);
                 if (responsiveVoxelData.accumulatedSampleNum > SHARC_SAMPLE_NUM_THRESHOLD)
-                    sharcRadiance += responsiveVoxelData.accumulatedRadiance;
+                    sharcRadiance += SharcDecodeRadiance(responsiveVoxelData.accumulatedRadiance, sharcRadianceDirection);
             }
 #endif // SHARC_ENABLE_RESPONSIVE_LIGHTING
             sharcRadiance *= materialDemodulation;
@@ -399,11 +641,11 @@ bool SharcUpdateHit(in SharcParameters sharcParameters, inout SharcState sharcSt
 #if SHARC_ENABLE_RESPONSIVE_LIGHTING
         if (responsiveCacheIndex != HASH_GRID_INVALID_CACHE_INDEX)
         {
-            SharcAddVoxelData(sharcParameters, responsiveCacheIndex, directLighting / materialDemodulation, float3(1.0f, 1.0f, 1.0f), 1);
+            SharcAddVoxelData(sharcParameters, responsiveCacheIndex, directLighting / materialDemodulation, float3(1.0f, 1.0f, 1.0f), sharcRadianceDirection, sharcRadianceDirectionWeight, 1);
             directLighting = float3(0.0f, 0.0f, 0.0f); // avoid adding the direct lighting contribution twice
         }
 #endif // SHARC_ENABLE_RESPONSIVE_LIGHTING
-        SharcAddVoxelData(sharcParameters, hashGridIndex, directLighting / materialDemodulation, float3(1.0f, 1.0f, 1.0f), 1);
+        SharcAddVoxelData(sharcParameters, hashGridIndex, directLighting / materialDemodulation, float3(1.0f, 1.0f, 1.0f), sharcRadianceDirection, sharcRadianceDirectionWeight, 1);
     }
 
 #if SHARC_SEPARATE_EMISSIVE
@@ -428,13 +670,24 @@ bool SharcUpdateHit(in SharcParameters sharcParameters, inout SharcState sharcSt
         tempHashGridIndex &= SHARC_CACHE_INDEX_BIT_MASK;
         isNewSample &= isResponsiveLighting;
 #endif // SHARC_ENABLE_RESPONSIVE_LIGHTING
-        SharcAddVoxelData(sharcParameters, tempHashGridIndex, sharcRadiance, sharcState.sampleWeights[i], isNewSample ? 1 : 0);
+#if SHARC_ENABLE_SH_ENCODING
+        float3 radianceDirection = sharcState.radianceDirections[i];
+        float radianceDirectionWeight = sharcState.radianceDirectionWeights[i];
+#else // !SHARC_ENABLE_SH_ENCODING
+        float3 radianceDirection = float3(0.0f, 0.0f, 1.0f);
+        float radianceDirectionWeight = 0.0f;
+#endif // SHARC_ENABLE_SH_ENCODING
+        SharcAddVoxelData(sharcParameters, tempHashGridIndex, sharcRadiance, sharcState.sampleWeights[i], radianceDirection, radianceDirectionWeight, isNewSample ? 1 : 0);
     }
 
     for (i = min(sharcState.pathLength, SHARC_PROPAGATION_DEPTH - 1); i > 0; --i)
     {
         sharcState.cacheIndices[i] = sharcState.cacheIndices[i - 1];
         sharcState.sampleWeights[i] = sharcState.sampleWeights[i - 1];
+#if SHARC_ENABLE_SH_ENCODING
+        sharcState.radianceDirections[i] = sharcState.radianceDirections[i - 1];
+        sharcState.radianceDirectionWeights[i] = sharcState.radianceDirectionWeights[i - 1];
+#endif // SHARC_ENABLE_SH_ENCODING
     }
 
 #if SHARC_ENABLE_RESPONSIVE_LIGHTING
@@ -447,6 +700,10 @@ bool SharcUpdateHit(in SharcParameters sharcParameters, inout SharcState sharcSt
 
     sharcState.cacheIndices[0] = hashGridIndex;
     sharcState.sampleWeights[0] = SharcSampleWeight(1.0f / materialDemodulation);
+#if SHARC_ENABLE_SH_ENCODING
+    sharcState.radianceDirections[0] = sharcRadianceDirection;
+    sharcState.radianceDirectionWeights[0] = sharcRadianceDirectionWeight;
+#endif // SHARC_ENABLE_SH_ENCODING
     sharcState.pathLength = min(++sharcState.pathLength, SHARC_PROPAGATION_DEPTH);
 #endif // SHARC_UPDATE
     return continueTracing;
@@ -460,6 +717,14 @@ void SharcSetThroughput(inout SharcState sharcState, float3 throughput)
 #endif // SHARC_UPDATE
 }
 
+void SharcSetRadianceDirectionWeight(inout SharcState sharcState, float radianceDirectionWeight)
+{
+#if SHARC_UPDATE && SHARC_ENABLE_SH_ENCODING
+    if (sharcState.pathLength > 0)
+        sharcState.radianceDirectionWeights[0] = saturate(radianceDirectionWeight);
+#endif // SHARC_UPDATE && SHARC_ENABLE_SH_ENCODING
+}
+
 bool SharcGetCachedRadiance(in SharcParameters sharcParameters, in SharcHitData sharcHitData, out float3 radiance, bool skipResponsiveLighting)
 {
     HashGridKey hashGridKey;
@@ -470,7 +735,8 @@ bool SharcGetCachedRadiance(in SharcParameters sharcParameters, in SharcHitData 
     SharcVoxelData voxelData = SharcGetVoxelData(sharcParameters.resolvedBuffer, hashGridIndex);
     if (voxelData.accumulatedSampleNum > SHARC_SAMPLE_NUM_THRESHOLD)
     {
-        radiance = voxelData.accumulatedRadiance;
+        float3 sharcRadianceDirection = SharcGetRadianceDirection(sharcHitData);
+        radiance = SharcDecodeRadiance(voxelData.accumulatedRadiance, sharcRadianceDirection);
 
 #if SHARC_ENABLE_RESPONSIVE_LIGHTING
         uint temp;
@@ -480,7 +746,7 @@ bool SharcGetCachedRadiance(in SharcParameters sharcParameters, in SharcHitData 
         {
             SharcVoxelData responsiveVoxelData = SharcGetVoxelData(sharcParameters.resolvedBuffer, hashGridIndex);
             if (responsiveVoxelData.accumulatedSampleNum > SHARC_SAMPLE_NUM_THRESHOLD)
-                radiance += responsiveVoxelData.accumulatedRadiance;
+                radiance += SharcDecodeRadiance(responsiveVoxelData.accumulatedRadiance, sharcRadianceDirection);
         }
 #endif // SHARC_ENABLE_RESPONSIVE_LIGHTING
 
@@ -569,7 +835,7 @@ void SharcResolveEntry(uint entryIndex, SharcParameters sharcParameters, SharcRe
     SharcPackedData resolvedData = BUFFER_AT_OFFSET(sharcParameters.resolvedBuffer, entryIndex);
     SharcVoxelData sharcVoxelData = SharcUnpackVoxelData(resolvedData);
 
-    float sampleNum = float(accumulatedData.data.w);
+    float sampleNum = SharcGetAccumulatedSampleNum(accumulatedData);
     float sampleNumPrev = sharcVoxelData.accumulatedSampleNum;
     uint accumulatedFrameNum = sharcVoxelData.accumulatedFrameNum + 1;
     uint staleFrameNum = sharcVoxelData.staleFrameNum;
@@ -583,13 +849,8 @@ void SharcResolveEntry(uint entryIndex, SharcParameters sharcParameters, SharcRe
     bool isValidElement = (staleFrameNum < staleFrameNumMax) ? true : false;
     if (!isValidElement)
     {
-        SharcAccumulationData zeroAccumulationData;
-        zeroAccumulationData.data = uint4(0, 0, 0, 0);
-
-        SharcPackedData zeroPackedData;
-        zeroPackedData.radianceData = float16_t4(0, 0, 0, 0);
-        zeroPackedData.sampleData = 0;
-        zeroPackedData.sampleDataExt = 0;
+        SharcAccumulationData zeroAccumulationData = SharcZeroAccumulationData();
+        SharcPackedData zeroPackedData = SharcZeroPackedData();
 
         BUFFER_AT_OFFSET(sharcParameters.hashGridData.hashEntriesBuffer, entryIndex) = HASH_GRID_INVALID_HASH_KEY;
         BUFFER_AT_OFFSET(sharcParameters.accumulationBuffer, entryIndex) = zeroAccumulationData;
@@ -619,7 +880,7 @@ void SharcResolveEntry(uint entryIndex, SharcParameters sharcParameters, SharcRe
             if (searchHashGridKey == targetHashGridKey)
             {
                 SharcAccumulationData targetAccumulatedData = BUFFER_AT_OFFSET(sharcParameters.accumulationBuffer, searchIndex);
-                sampleNum = float(targetAccumulatedData.data.w);
+                sampleNum = SharcGetAccumulatedSampleNum(targetAccumulatedData);
                 break;
             }
         }
@@ -646,8 +907,8 @@ void SharcResolveEntry(uint entryIndex, SharcParameters sharcParameters, SharcRe
         }
     }
 
-    float3 accumulatedRadiance = float3(accumulatedData.data.xyz) * rcp(sharcParameters.radianceScale);
-    float3 accumulatedRadiancePrev = sharcVoxelData.accumulatedRadiance;
+    SharcRadianceData accumulatedRadiance = SharcGetAccumulatedRadianceData(accumulatedData, sharcParameters.radianceScale, sampleNum);
+    SharcRadianceData accumulatedRadiancePrev = sharcVoxelData.accumulatedRadiance;
     uint accumulationFrameNum = clamp(isResponsiveSignal ? resolveParameters.responsiveFrameNum : resolveParameters.accumulationFrameNum, SHARC_ACCUMULATED_FRAME_NUM_MIN, SHARC_ACCUMULATED_FRAME_NUM_MAX);
     if (accumulatedFrameNum > accumulationFrameNum)
     {
@@ -656,14 +917,13 @@ void SharcResolveEntry(uint entryIndex, SharcParameters sharcParameters, SharcRe
         sampleNumPrev *= normalizationScale;
     }
 
-    accumulatedRadiance = accumulatedRadiance / max(sampleNum, 1e-6f);
 #if SHARC_ENABLE_FADE_ACCELERATION
     {
         uint bitOffset = resolveParameters.frameIndex % 32u;
         uint bit = 1u << bitOffset;
 
-        float lumaCur = SharcLuma(accumulatedRadiance);
-        float lumaPrev = SharcLuma(accumulatedRadiancePrev);
+        float lumaCur = SharcRadianceLuma(accumulatedRadiance);
+        float lumaPrev = SharcRadianceLuma(accumulatedRadiancePrev);
         bool fading = lumaCur < lumaPrev;
 
         sharcVoxelData.sampleDataExt = (sharcVoxelData.sampleDataExt & ~bit) | (fading ? bit : 0u);
@@ -673,7 +933,7 @@ void SharcResolveEntry(uint entryIndex, SharcParameters sharcParameters, SharcRe
     }
 #endif // SHARC_ENABLE_FADE_ACCELERATION
     float sampleTotalInv = rcp(sampleNumPrev + sampleNum);
-    accumulatedRadiance = sampleNumPrev * sampleTotalInv * accumulatedRadiancePrev + sampleNum * sampleTotalInv * accumulatedRadiance;
+    accumulatedRadiance = SharcAddRadianceData(SharcScaleRadianceData(accumulatedRadiancePrev, sampleNumPrev * sampleTotalInv), SharcScaleRadianceData(accumulatedRadiance, sampleNum * sampleTotalInv));
     float accumulatedSampleNum = sampleNumPrev + sampleNum;
 
 #if SHARC_BLEND_ADJACENT_LEVELS
@@ -694,7 +954,9 @@ void SharcResolveEntry(uint entryIndex, SharcParameters sharcParameters, SharcRe
             if (adjacentSampleNum > SHARC_SAMPLE_NUM_THRESHOLD)
             {
                 float blendWeight = rcp(adjacentSampleNum + accumulatedSampleNum);
-                accumulatedRadiance = adjacentSampleNum * blendWeight * adjacentVoxelDataPrev.accumulatedRadiance + accumulatedSampleNum * blendWeight * accumulatedRadiance.xyz;
+                accumulatedRadiance = SharcAddRadianceData(
+                    SharcScaleRadianceData(adjacentVoxelDataPrev.accumulatedRadiance, adjacentSampleNum * blendWeight),
+                    SharcScaleRadianceData(accumulatedRadiance, accumulatedSampleNum * blendWeight));
                 accumulatedSampleNum += adjacentSampleNum;
             }
         }
@@ -705,8 +967,7 @@ void SharcResolveEntry(uint entryIndex, SharcParameters sharcParameters, SharcRe
 
 #if !SHARC_ENABLE_RESPONSIVE_LIGHTING
     // Clear buffer entry for the next frame
-    SharcAccumulationData zeroAccumulationData;
-    zeroAccumulationData.data = uint4(0, 0, 0, 0);
+    SharcAccumulationData zeroAccumulationData = SharcZeroAccumulationData();
     BUFFER_AT_OFFSET(sharcParameters.accumulationBuffer, entryIndex) = zeroAccumulationData;
 #endif // !SHARC_ENABLE_RESPONSIVE_LIGHTING
 }

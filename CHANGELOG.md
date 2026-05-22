@@ -1,6 +1,12 @@
+## 1.8.0
+
+- Added optional **SHARC_ENABLE_SH_ENCODING** (default: off), which adds directionality support for more accurate cached radiance reconstruction. This is typically needed to avoid extra light leaking from bright specular highlights into unrelated viewing directions.
+- When **SHARC_ENABLE_SH_ENCODING** is enabled, both accumulation and resolved buffer storage layouts change to store the extra directional radiance data. Integrations must allocate 32-byte accumulation entries and 24-byte resolved entries instead of the default 16-byte entries.
+- Added AGENTS.md for agent-based integration support
+
 ## 1.7.2
 
-- Added an experimental responsive lighting mode to support short-lived, high-intensity light sources, controlled by the **SHARC_RESPONSIVE_LIGHTING** define. ```SharcUpdateHit()``` and ```SharcUpdateMiss()``` now include an additional parameter to indicate a responsive signal. This parameter is ignored when responsive lighting is disabled. ```SharcGetCachedRadiance()``` has also been extended with an extra parameter that allows skipping responsive lighting contributions when they are known to have no impact on the current scene
+- Added an experimental responsive lighting mode to support short-lived, high-intensity light sources, controlled by the **SHARC_ENABLE_RESPONSIVE_LIGHTING** define. ```SharcUpdateHit()``` and ```SharcUpdateMiss()``` now include an additional parameter to indicate a responsive signal. This parameter is ignored when responsive lighting is disabled. ```SharcGetCachedRadiance()``` has also been extended with an extra parameter that allows skipping responsive lighting contributions when they are known to have no impact on the current scene
 - Fixed a bug where the last vertex contribution could be missed during the update pass
 - The cache update pass now uses only 2 entries by default with resampling, which can improve performance and reduce register pressure in some cases
 - Added a compact version of the hash grid with 32-bit hash keys
