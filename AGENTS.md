@@ -199,17 +199,7 @@ If the engine has a render graph, express the same dependencies in graph edges. 
 
 Add the local SHARC include directory to the shader compiler include path. Prefer the project's existing third-party layout, and do not create a duplicate SDK copy if one already exists.
 
-Common local include roots to check are:
-
-```text
-External/SHARC/include
-external/SHARC/include
-extern/SHARC/include
-third_party/SHARC/include
-ThirdParty/SHARC/include
-vendor/SHARC/include
-submodules/SHARC/include
-```
+SHARC requires native fp16 shader type support. For HLSL/DXC shader compilation, add `-enable-16bit-types` to every shader permutation that includes `SharcTypes.h` or `SharcCommon.h`, including Update, Resolve, Query, and debug/visualization shaders. DXIL targets should use Shader Model 6.2 or newer, and the runtime device must support native 16-bit types. For Vulkan/SPIR-V output from DXC, pass `-enable-16bit-types` alongside the existing SPIR-V options and enable the matching device capabilities/extensions.
 
 Use the SDK supplied in the workspace. Do not fetch SHARC from the network unless the user explicitly asked for that.
 
@@ -227,7 +217,7 @@ Required shader defines/permutations:
 Default/reference path tracer: SHARC_UPDATE=0, SHARC_QUERY=0
 SHARC Update permutation:     SHARC_UPDATE=1, SHARC_QUERY=0
 SHARC Query permutation:      SHARC_UPDATE=0, SHARC_QUERY=1
-SHARC Resolve compute:        SHARC_UPDATE=0, SHARC_QUERY=0 unless local SDK requires otherwise
+SHARC Resolve compute:        SHARC_UPDATE=0, SHARC_QUERY=0
 ```
 
 ## 8. Host-side resources
@@ -243,7 +233,6 @@ struct SharcResources
     BufferHandle resolved;
     BindingSetHandle bindingSet;
     BindingLayoutHandle bindingLayout;
-    bool initialized = false;
 };
 ```
 
@@ -267,17 +256,15 @@ Rules:
 2. The local SHARC integration guidance may state that all core buffers should be initially cleared to zero; use zero initialization when the local SDK matches that contract.
 3. If the local SDK or local sample exposes a nonzero invalid-key value for hash entries, clear hash entries to that value and document the reason in the code.
 4. Clear accumulation and resolved buffers to zero unless the local SDK version explicitly says otherwise.
-5. On scene reload, material-demodulation mode change, SHARC parameter reset, responsive-lighting mode change, or resize that invalidates resources, clear all SHARC cache resources again.
+5. On scene reload, material-demodulation mode change, SHARC parameter reset, or resize that invalidates resources, clear all SHARC cache resources again.
 6. For responsive lighting mode, follow the local SDK integration guidance: accumulation may require an explicit full clear before Update because Resolve may not clear it in that mode.
-
-Do not invent magic invalid hash constants. Wire them from a shared C++ constant, shader reflection metadata, or a local project constant confirmed against the local SDK.
 
 ## 9. Descriptor/register binding
 
 Prefer the project's descriptor abstraction. The RTXGI sample binds SHARC resources in a separate descriptor set/register space and uses this HLSL shape:
 
 ```hlsl
-RWStructuredBuffer<uint64_t> u_SharcHashEntriesBuffer : register(u0, space3);
+RWStructuredBuffer<HashGridKey> u_SharcHashEntriesBuffer : register(u0, space3);
 RWStructuredBuffer<SharcAccumulationData> u_SharcAccumulationBuffer : register(u2, space3);
 RWStructuredBuffer<SharcPackedData> u_SharcResolvedBuffer : register(u3, space3);
 ```
@@ -701,7 +688,7 @@ Add the required descriptors/UAV/SRV bindings once, using the project's existing
 
 Add the SHARC Resolve compute shader and pipeline using the local SDK's actual function signatures. Dispatch `ceil(sharcEntriesNum / 256)` thread groups and call `SharcResolveEntry()` once per cache entry. Make sure any local responsive-lighting behavior is honored, including explicit accumulation clears when the SDK requires them.
 
-Add SHARC Update and SHARC Query permutations to the existing tracing pipeline, whether it is DXR/VKRT ray tracing, inline ray queries, or compute shaders using project ray wrappers. Compile Update with `SHARC_UPDATE=1, SHARC_QUERY=0`; compile Query with `SHARC_UPDATE=0, SHARC_QUERY=1`; keep the reference path with both disabled. Route the enabled render path as:
+Add SHARC Update and SHARC Query permutations to the existing tracing pipeline, whether it is DXR/VKRT ray tracing, inline ray queries, or compute shaders using project ray wrappers. Compile Update with `SHARC_UPDATE=1, SHARC_QUERY=0`; compile Query with `SHARC_UPDATE=0, SHARC_QUERY=1`; add DXC `-enable-16bit-types` to all HLSL permutations that include the SHARC headers; keep the reference path with both disabled. Route the enabled render path as:
 
 ```text
 SHARC Update tracing pass
@@ -730,20 +717,21 @@ The integration is complete only when all applicable criteria are met:
 7. A SHARC Update tracing permutation/pass exists and compiles with `SHARC_UPDATE=1`.
 8. A SHARC Resolve compute pass exists and calls `SharcResolveEntry()` for each cache entry.
 9. A SHARC Query tracing permutation/pass exists and compiles with `SHARC_QUERY=1`.
-10. Render loop runs Update, barrier, Resolve, barrier, Query when SHARC is enabled.
-11. SHARC is used as an optimization for the original real-time path tracer path.
-12. Query pass writes the final output or denoiser input expected by the engine.
-13. Update pass uses sparse distributed coverage, not a fixed top-left subrect.
-14. Cache query excludes primary/visibility hits, including replaced primary surfaces, or has an explicit project-approved primary/visibility-query policy.
-15. Split-primary, secondary-only, and no-primary query shaders classify indirect bounces by traced continuation segments, not only by local bounce index.
-16. Cache query checks segment length against voxel size.
-17. Specular/glossy paths use a roughness/footprint gate or are excluded from cache query.
-18. Denoiser/G-buffer outputs still work if the project uses a denoiser.
-19. Scene reload, resource resize, or material-demodulation mode change resets the cache.
-20. SHARC Query permutations must compile without referencing `sharcRoughnessMin`; that parameter is only allowed in `SHARC_UPDATE` code.
-21. Comments or render-graph labels make the required Update -> Resolve -> Query ordering and barriers clear.
-22. Final response lists files changed and commands run.
-23. Final response explains the new SHARC render flow and lists new build flags, runtime toggles, and shader defines.
+10. All HLSL shader permutations that include SHARC headers compile with DXC `-enable-16bit-types`, and Vulkan/SPIR-V paths enable equivalent native fp16 capabilities.
+11. Render loop runs Update, barrier, Resolve, barrier, Query when SHARC is enabled.
+12. SHARC is used as an optimization for the original real-time path tracer path.
+13. Query pass writes the final output or denoiser input expected by the engine.
+14. Update pass uses sparse distributed coverage, not a fixed top-left subrect.
+15. Cache query excludes primary/visibility hits, including replaced primary surfaces, or has an explicit project-approved primary/visibility-query policy.
+16. Split-primary, secondary-only, and no-primary query shaders classify indirect bounces by traced continuation segments, not only by local bounce index.
+17. Cache query checks segment length against voxel size.
+18. Specular/glossy paths use a roughness/footprint gate or are excluded from cache query.
+19. Denoiser/G-buffer outputs still work if the project uses a denoiser.
+20. Scene reload, resource resize, or material-demodulation mode change resets the cache.
+21. SHARC Query permutations must compile without referencing `sharcRoughnessMin`; that parameter is only allowed in `SHARC_UPDATE` code.
+22. Comments or render-graph labels make the required Update -> Resolve -> Query ordering and barriers clear.
+23. Final response lists files changed and commands run.
+24. Final response explains the new SHARC render flow and lists new build flags, runtime toggles, and shader defines.
 
 ## 21. Final response requirements
 

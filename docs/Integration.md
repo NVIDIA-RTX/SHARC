@@ -61,6 +61,12 @@ The logarithm base controls the distribution of detail levels and the ratio of v
 
 ## Implementation Details
 
+### Shader Compiler Requirements
+
+SHaRC requires native fp16 shader type support. `SharcTypes.h` stores resolved cache data as `float16_t4`, and enabling `SHARC_USE_FP16` also stores update sample weights as `float16_t3`. For HLSL, compile every shader permutation that includes `SharcTypes.h` or `SharcCommon.h` with DXC `-enable-16bit-types`. This applies to SHaRC Update, SHaRC Resolve, SHaRC Render/Query, and any debug or visualization shaders that include the SHaRC headers.
+
+The shader target and runtime device must expose native 16-bit type support. DXIL targets should use Shader Model 6.2 or newer. For Vulkan/SPIR-V builds driven by DXC, pass `-enable-16bit-types` together with the existing SPIR-V arguments and enable the corresponding 16-bit arithmetic/storage capabilities in the renderer. For GLSL integrations, include `SharcGlslHelpers.h` before `SharcCommon.h` and enable the required fp16 extensions listed there.
+
 ### Render Loop Change
 
 Instead of the original trace call, we should have the following three passes with SHaRC:

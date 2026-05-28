@@ -43,6 +43,9 @@
 // Required resources are hash entries, accumulation, and resolved buffers.
 // All buffers must have the same number of entries and be zero-initialized.
 // Proper UAV barriers are required between passes to guarantee correctness.
+//
+// HLSL shaders that include SHARC headers must be compiled with DXC
+// -enable-16bit-types and, for DXIL, Shader Model 6.2 or newer.
 
 // Constants
 #define SHARC_ACCUMULATED_FRAME_NUM_BIT_OFFSET  0
@@ -117,7 +120,7 @@
 #endif
 
 #ifndef SHARC_USE_FP16
-#define SHARC_USE_FP16                          0       // use fp16 for sample weights storage
+#define SHARC_USE_FP16                          0       // use native fp16 for sample weights storage; HLSL requires DXC -enable-16bit-types
 #endif
 
 #ifndef SHARC_RESPONSIVE_ENTRY_PROBE_RANGE

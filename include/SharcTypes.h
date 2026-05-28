@@ -11,6 +11,10 @@
 #ifndef SHARC_TYPES_H
 #define SHARC_TYPES_H
 
+// SharcPackedData uses native float16_t storage. HLSL shaders that include this
+// header must be compiled with DXC -enable-16bit-types and, for DXIL, Shader
+// Model 6.2 or newer. The runtime device must support native 16-bit types.
+
 struct SharcAccumulationData
 {
 #if SHARC_ENABLE_SH_ENCODING
