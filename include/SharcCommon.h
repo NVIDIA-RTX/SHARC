@@ -901,10 +901,13 @@ void SharcResolveEntry(uint entryIndex, SharcParameters sharcParameters, SharcRe
 
     // Performs hash map lookup to find existing entries in case previous insertions
     // encountered collisions and a different slot was assigned.
-    // Uses a fixed-size linear probe window
+    // Uses a fixed-size linear probe window, clamped to the table capacity: an application is allowed to
+    // allocate exactly `capacity` entries, so entries in the last window cannot blindly look forward —
+    // doing so reads past the end of the hash-entry and resolved buffers once those slots become occupied
     if (sampleNumPrev == 0)
     {
-        for (uint i = entryIndex + 1; i < entryIndex + 1 + SHARC_LINEAR_PROBE_WINDOW_SIZE; ++i)
+        uint probeEnd = min(entryIndex + 1 + SHARC_LINEAR_PROBE_WINDOW_SIZE, sharcParameters.hashGridData.capacity);
+        for (uint i = entryIndex + 1; i < probeEnd; ++i)
         {
             HashGridKey hashKeyOld = BUFFER_AT_OFFSET(sharcParameters.hashGridData.hashEntriesBuffer, i);
             if (hashKeyOld == hashGridKey)
