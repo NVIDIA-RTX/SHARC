@@ -564,6 +564,12 @@ void SharcUpdateMiss(in SharcParameters sharcParameters, in SharcState sharcStat
     for (int i = 0; i < sharcState.pathLength; ++i)
     {
         HashGridIndex hashGridIndex = sharcState.cacheIndices[i];
+        // A full bucket makes HashGridInsertEntry return HASH_GRID_INVALID_CACHE_INDEX and SharcUpdateHit stores
+        // that sentinel into cacheIndices verbatim. It must be skipped before the responsive offset/mask block:
+        // masking it unconditionally rewrites it to SHARC_CACHE_INDEX_BIT_MASK, which is no longer INVALID, so
+        // SharcAddVoxelData's guard passes and the atomics land far past the end of the accumulation buffer
+        if (hashGridIndex == HASH_GRID_INVALID_CACHE_INDEX)
+            continue;
         bool isNewSample = false;
 #if SHARC_ENABLE_RESPONSIVE_LIGHTING
         if (isResponsiveLighting)
@@ -659,6 +665,9 @@ bool SharcUpdateHit(in SharcParameters sharcParameters, inout SharcState sharcSt
     for (i = 0; i < sharcState.pathLength; ++i)
     {
         HashGridIndex tempHashGridIndex = sharcState.cacheIndices[i];
+        // Skip full-bucket sentinels before the responsive offset/mask block — same reasoning as SharcUpdateMiss
+        if (tempHashGridIndex == HASH_GRID_INVALID_CACHE_INDEX)
+            continue;
         bool isNewSample = false;
 #if SHARC_ENABLE_RESPONSIVE_LIGHTING
         if (responsiveCacheIndex != HASH_GRID_INVALID_CACHE_INDEX)
