@@ -15,7 +15,7 @@
 #define HASH_GRID_INVALID_HASH_KEY      0
 #define HASH_GRID_INVALID_CACHE_INDEX   0xFFFFFFFF
 
-typedef uint HashGridIndex;
+#define HashGridIndex uint
 
 struct HashGridParameters
 {

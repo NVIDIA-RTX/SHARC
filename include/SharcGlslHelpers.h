@@ -49,12 +49,15 @@
 #define f16tof32(u) unpackHalf2x16(u).x
 #define InterlockedAdd atomicAdd
 #define InterlockedOr atomicOr
-#define InterlockedExchange atomicExchange
-#define InterlockedCompareExchange atomicCompSwap
+#define InterlockedExchange(destination, value, original) original = atomicExchange(destination, value)
+#define InterlockedCompareExchange(destination, compare, value, original) original = atomicCompSwap(destination, compare, value)
 
+#define HASH_GRID_CONST const
 #define HASH_GRID_LOOP_ATTR [[dont_unroll]]
 
-#define RW_STRUCTURED_BUFFER(name, type) RWStructuredBuffer_##type name
+#define RW_STRUCTURED_BUFFER_I(name, type) RWStructuredBuffer_##type name
+#define RW_STRUCTURED_BUFFER(name, type) RW_STRUCTURED_BUFFER_I(name, type)
+
 #define BUFFER_AT_OFFSET(name, offset) name.data[offset]
 
 layout(buffer_reference, std430, buffer_reference_align = 8) buffer RWStructuredBuffer_uint64_t {

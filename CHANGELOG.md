@@ -1,3 +1,11 @@
+## 1.8.2
+
+- Fixed an out-of-bounds read in the previous-data recovery scan near the end of the hash-grid buffer
+- Fixed adjacent-level blending using the current-level hash key when calculating the adjacent-level probe location
+- Fixed `SHARC_ENABLE_CACHE_RESAMPLING=0` incorrectly selecting the cache-resampling propagation depth
+- Some math optimizations and refactoring
+- Improved GLSL compatibility
+
 ## 1.8.0
 
 - Added optional **SHARC_ENABLE_SH_ENCODING** (default: off), which adds directionality support for more accurate cached radiance reconstruction. This is typically needed to avoid extra light leaking from bright specular highlights into unrelated viewing directions.

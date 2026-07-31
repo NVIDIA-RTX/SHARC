@@ -89,7 +89,7 @@ Each pass requires UAV barriers to ensure that writes from the previous pass are
 | SHaRC Resolve    |        RW        |        RW        |      RW      |                 |
 | SHaRC Render     |       Read       |                  |     Read     |                 |
 
-*Buffer is used if SHARC_ENABLE_64_BIT_ATOMICS is set to 0
+*Buffer is used if HASH_GRID_ENABLE_64_BIT_ATOMICS is set to 0
 
 ### SHaRC Update
 
