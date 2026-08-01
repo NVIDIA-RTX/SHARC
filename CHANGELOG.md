@@ -1,3 +1,7 @@
+## 1.8.3
+
+- Improved hash-grid overflow handling: SHARC Update now terminates safely when regular or responsive entries cannot be allocated, preventing invalid cache-index access
+
 ## 1.8.2
 
 - Fixed an out-of-bounds read in the previous-data recovery scan near the end of the hash-grid buffer

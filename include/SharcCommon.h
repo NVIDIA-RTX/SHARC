@@ -11,7 +11,7 @@
 // Version
 #define SHARC_VERSION_MAJOR                     1
 #define SHARC_VERSION_MINOR                     8
-#define SHARC_VERSION_BUILD                     2
+#define SHARC_VERSION_BUILD                     3
 #define SHARC_VERSION_REVISION                  0
 
 // SHaRC usage overview
@@ -24,7 +24,7 @@
 //    paths and writes newly observed radiance into the accumulation cache.
 //    Call SharcInit() for each sampled path, SharcUpdateHit() on hits, and
 //    SharcUpdateMiss() on misses. If SharcUpdateHit() returns false, the path
-//    may be terminated early. Each path segment is treated independently:
+//    must be terminated early. Each path segment is treated independently:
 //    after selecting the next ray, call SharcSetThroughput() with the segment
 //    throughput, then reset path throughput to 1.0 for the next segment.
 //
@@ -163,9 +163,20 @@
 #undef HASH_GRID_PREFIX
 #undef HASH_GRID_CONST_PREFIX
 
-#if SHARC_ENABLE_RESPONSIVE_LIGHTING && HASH_GRID_COMPACT
+// Error checks
+#if SHARC_ENABLE_RESPONSIVE_LIGHTING
+#if SHARC_RESPONSIVE_ENTRY_PROBE_RANGE < 1
+#error SHARC_RESPONSIVE_ENTRY_PROBE_RANGE must be at least 1
+#endif
+
+#if SHARC_RESPONSIVE_ENTRY_PROBE_RANGE > HASH_GRID_HASH_MAP_BUCKET_SIZE
+#error SHARC_RESPONSIVE_ENTRY_PROBE_RANGE must not exceed HASH_GRID_HASH_MAP_BUCKET_SIZE
+#endif
+
+#if HASH_GRID_COMPACT
 #error compact hash grid currently doesn't work with responsive lighting
 #endif
+#endif // SHARC_ENABLE_RESPONSIVE_LIGHTING
 
 #include "SharcTypes.h"
 
@@ -444,24 +455,9 @@ SharcVoxelData SharcUnpackVoxelData(SharcPackedData packedData)
 
 SharcVoxelData SharcGetVoxelData(RW_STRUCTURED_BUFFER(voxelDataBuffer, SharcPackedData), HashGridIndex hashGridIndex)
 {
-    if (hashGridIndex != HASH_GRID_INVALID_CACHE_INDEX)
-    {
-        SharcPackedData packedData = BUFFER_AT_OFFSET(voxelDataBuffer, hashGridIndex);
-        SharcVoxelData voxelData = SharcUnpackVoxelData(packedData);
+    SharcPackedData packedData = BUFFER_AT_OFFSET(voxelDataBuffer, hashGridIndex);
 
-        return voxelData;
-    }
-    else
-    {
-        SharcVoxelData voxelData;
-        voxelData.accumulatedRadiance = SharcZeroRadianceData();
-        voxelData.accumulatedSampleNum = 0;
-        voxelData.accumulatedFrameNum = 0;
-        voxelData.staleFrameNum = 0;
-        voxelData.sampleDataExt = 0;
-
-        return voxelData;
-    }
+    return SharcUnpackVoxelData(packedData);
 }
 
 float SharcLuma(float3 color)
@@ -482,29 +478,26 @@ float SharcRadianceLuma(SharcRadianceData radianceData)
 
 void SharcAddVoxelData(in SharcParameters sharcParameters, HashGridIndex hashGridIndex, float3 sampleValue, float3 sampleWeight, float3 sampleDirection, float sampleDirectionWeight, uint sampleData)
 {
-    if (hashGridIndex != HASH_GRID_INVALID_CACHE_INDEX)
-    {
 #if SHARC_ENABLE_SH_ENCODING
-        SharcRadianceData scaledSample = SharcEncodeRadiance(sampleValue * sampleWeight, sampleDirection, sampleDirectionWeight);
-        int4 scaledLuminanceSH = int4(scaledSample.luminanceSH * sharcParameters.radianceScale);
-        int2 scaledChromaL0 = int2(scaledSample.chromaL0 * sharcParameters.radianceScale);
+    SharcRadianceData scaledSample = SharcEncodeRadiance(sampleValue * sampleWeight, sampleDirection, sampleDirectionWeight);
+    int4 scaledLuminanceSH = int4(scaledSample.luminanceSH * sharcParameters.radianceScale);
+    int2 scaledChromaL0 = int2(scaledSample.chromaL0 * sharcParameters.radianceScale);
 
-        if (scaledLuminanceSH.x != 0) InterlockedAdd(BUFFER_AT_OFFSET(sharcParameters.accumulationBuffer, hashGridIndex).data.x, scaledLuminanceSH.x);
-        if (scaledLuminanceSH.y != 0) InterlockedAdd(BUFFER_AT_OFFSET(sharcParameters.accumulationBuffer, hashGridIndex).data.y, scaledLuminanceSH.y);
-        if (scaledLuminanceSH.z != 0) InterlockedAdd(BUFFER_AT_OFFSET(sharcParameters.accumulationBuffer, hashGridIndex).data.z, scaledLuminanceSH.z);
-        if (scaledLuminanceSH.w != 0) InterlockedAdd(BUFFER_AT_OFFSET(sharcParameters.accumulationBuffer, hashGridIndex).data.w, scaledLuminanceSH.w);
-        if (scaledChromaL0.x != 0) InterlockedAdd(BUFFER_AT_OFFSET(sharcParameters.accumulationBuffer, hashGridIndex).dataExt.x, scaledChromaL0.x);
-        if (scaledChromaL0.y != 0) InterlockedAdd(BUFFER_AT_OFFSET(sharcParameters.accumulationBuffer, hashGridIndex).dataExt.y, scaledChromaL0.y);
-        if (sampleData != 0) InterlockedAdd(BUFFER_AT_OFFSET(sharcParameters.accumulationBuffer, hashGridIndex).dataExt.z, int(sampleData));
+    if (scaledLuminanceSH.x != 0) InterlockedAdd(BUFFER_AT_OFFSET(sharcParameters.accumulationBuffer, hashGridIndex).data.x, scaledLuminanceSH.x);
+    if (scaledLuminanceSH.y != 0) InterlockedAdd(BUFFER_AT_OFFSET(sharcParameters.accumulationBuffer, hashGridIndex).data.y, scaledLuminanceSH.y);
+    if (scaledLuminanceSH.z != 0) InterlockedAdd(BUFFER_AT_OFFSET(sharcParameters.accumulationBuffer, hashGridIndex).data.z, scaledLuminanceSH.z);
+    if (scaledLuminanceSH.w != 0) InterlockedAdd(BUFFER_AT_OFFSET(sharcParameters.accumulationBuffer, hashGridIndex).data.w, scaledLuminanceSH.w);
+    if (scaledChromaL0.x != 0) InterlockedAdd(BUFFER_AT_OFFSET(sharcParameters.accumulationBuffer, hashGridIndex).dataExt.x, scaledChromaL0.x);
+    if (scaledChromaL0.y != 0) InterlockedAdd(BUFFER_AT_OFFSET(sharcParameters.accumulationBuffer, hashGridIndex).dataExt.y, scaledChromaL0.y);
+    if (sampleData != 0) InterlockedAdd(BUFFER_AT_OFFSET(sharcParameters.accumulationBuffer, hashGridIndex).dataExt.z, int(sampleData));
 #else // !SHARC_ENABLE_SH_ENCODING
-        uint3 scaledRadiance = uint3(sampleValue * sampleWeight * sharcParameters.radianceScale);
+    uint3 scaledRadiance = uint3(sampleValue * sampleWeight * sharcParameters.radianceScale);
 
-        if (scaledRadiance.x != 0) InterlockedAdd(BUFFER_AT_OFFSET(sharcParameters.accumulationBuffer, hashGridIndex).data.x, scaledRadiance.x);
-        if (scaledRadiance.y != 0) InterlockedAdd(BUFFER_AT_OFFSET(sharcParameters.accumulationBuffer, hashGridIndex).data.y, scaledRadiance.y);
-        if (scaledRadiance.z != 0) InterlockedAdd(BUFFER_AT_OFFSET(sharcParameters.accumulationBuffer, hashGridIndex).data.z, scaledRadiance.z);
-        if (sampleData != 0) InterlockedAdd(BUFFER_AT_OFFSET(sharcParameters.accumulationBuffer, hashGridIndex).data.w, sampleData);
+    if (scaledRadiance.x != 0) InterlockedAdd(BUFFER_AT_OFFSET(sharcParameters.accumulationBuffer, hashGridIndex).data.x, scaledRadiance.x);
+    if (scaledRadiance.y != 0) InterlockedAdd(BUFFER_AT_OFFSET(sharcParameters.accumulationBuffer, hashGridIndex).data.y, scaledRadiance.y);
+    if (scaledRadiance.z != 0) InterlockedAdd(BUFFER_AT_OFFSET(sharcParameters.accumulationBuffer, hashGridIndex).data.z, scaledRadiance.z);
+    if (sampleData != 0) InterlockedAdd(BUFFER_AT_OFFSET(sharcParameters.accumulationBuffer, hashGridIndex).data.w, sampleData);
 #endif // SHARC_ENABLE_SH_ENCODING
-    }
 }
 
 void SharcInit(inout SharcState sharcState)
@@ -527,10 +520,10 @@ int SharcUnpackOffset(uint packedIndex)
     return (int(packedIndex)) >> SHARC_CACHE_INDEX_BIT_NUM;
 }
 
-int SharcGetResponsiveIndexOffset(in SharcParameters sharcParameters, HashGridIndex hashGridIndex, out bool isNewSample)
+bool SharcGetResponsiveIndexOffset(in SharcParameters sharcParameters, HashGridIndex hashGridIndex, out int responsiveIndexOffset, out bool isNewSample)
 {
+    responsiveIndexOffset = SharcUnpackOffset(hashGridIndex);
     isNewSample = false;
-    int responsiveIndexOffset = SharcUnpackOffset(hashGridIndex);
     if (responsiveIndexOffset == 0)
     {
         HashGridKey hashGridKey = BUFFER_AT_OFFSET(sharcParameters.hashGridData.hashEntriesBuffer, hashGridIndex);
@@ -538,14 +531,14 @@ int SharcGetResponsiveIndexOffset(in SharcParameters sharcParameters, HashGridIn
         hashGridKey |= HashGridKey(1) << (HASH_GRID_KEY_BIT_NUM - 1);
         HashGridIndex responsiveIndex;
         uint bucketOffset;
-        if (HashGridInsert(sharcParameters.hashGridData, hashGridKey, baseSlot, SHARC_RESPONSIVE_ENTRY_PROBE_RANGE, responsiveIndex, bucketOffset))
-        {
-            responsiveIndexOffset = int(responsiveIndex) - int(hashGridIndex);
-            isNewSample = true;
-        }
+        if (!HashGridInsert(sharcParameters.hashGridData, hashGridKey, baseSlot, SHARC_RESPONSIVE_ENTRY_PROBE_RANGE, responsiveIndex, bucketOffset))
+            return false;
+
+        responsiveIndexOffset = int(responsiveIndex) - int(hashGridIndex);
+        isNewSample = true;
     }
 
-    return responsiveIndexOffset;
+    return true;
 }
 #endif // SHARC_ENABLE_RESPONSIVE_LIGHTING
 
@@ -560,10 +553,14 @@ void SharcUpdateMiss(in SharcParameters sharcParameters, in SharcState sharcStat
     {
         HashGridIndex hashGridIndex = sharcState.cacheIndices[i];
         bool isNewSample = false;
+
 #if SHARC_ENABLE_RESPONSIVE_LIGHTING
         if (isResponsiveLighting)
         {
-            int responsiveIndexOffset = SharcGetResponsiveIndexOffset(sharcParameters, sharcState.cacheIndices[i], isNewSample);
+            int responsiveIndexOffset;
+            if (!SharcGetResponsiveIndexOffset(sharcParameters, sharcState.cacheIndices[i], responsiveIndexOffset, isNewSample))
+                return;
+
             hashGridIndex += responsiveIndexOffset;
         }
 
@@ -590,7 +587,9 @@ bool SharcUpdateHit(in SharcParameters sharcParameters, inout SharcState sharcSt
     bool continueTracing = true;
 #if SHARC_UPDATE
     HashGridKey hashGridKey;
-    HashGridIndex hashGridIndex = HashGridInsertEntry(sharcParameters.hashGridData, sharcHitData.positionWorld, sharcHitData.normalWorld, sharcParameters.hashGridParameters, hashGridKey);
+    HashGridIndex hashGridIndex;
+    if (!HashGridInsertEntry(sharcParameters.hashGridData, sharcHitData.positionWorld, sharcHitData.normalWorld, sharcParameters.hashGridParameters, hashGridKey, hashGridIndex))
+        return false;
 
 #if SHARC_ENABLE_RESPONSIVE_LIGHTING
     HashGridIndex responsiveCacheIndex = HASH_GRID_INVALID_CACHE_INDEX;
@@ -655,11 +654,17 @@ bool SharcUpdateHit(in SharcParameters sharcParameters, inout SharcState sharcSt
     for (i = 0; i < sharcState.pathLength; ++i)
     {
         HashGridIndex tempHashGridIndex = sharcState.cacheIndices[i];
+        if (tempHashGridIndex == HASH_GRID_INVALID_CACHE_INDEX)
+            continue;
+
         bool isNewSample = false;
 #if SHARC_ENABLE_RESPONSIVE_LIGHTING
         if (responsiveCacheIndex != HASH_GRID_INVALID_CACHE_INDEX)
         {
-            int responsiveIndexOffset = SharcGetResponsiveIndexOffset(sharcParameters, sharcState.cacheIndices[i], isNewSample);
+            int responsiveIndexOffset;
+            if (!SharcGetResponsiveIndexOffset(sharcParameters, sharcState.cacheIndices[i], responsiveIndexOffset, isNewSample))
+                return false;
+
             tempHashGridIndex += responsiveIndexOffset;
 
             if (isNewSample)
@@ -726,9 +731,9 @@ void SharcSetRadianceDirectionWeight(inout SharcState sharcState, float radiance
 
 bool SharcGetCachedRadianceFromHash(in SharcParameters sharcParameters, in SharcHitData sharcHitData, HashGridKey hashGridKey, out float3 radiance, bool skipResponsiveLighting)
 {
-    HashGridIndex hashGridIndex = HASH_GRID_INVALID_CACHE_INDEX;
-    uint bucketOffset;
+    HashGridIndex hashGridIndex;
     uint baseSlot = HashGridGetBaseSlot(hashGridKey, sharcParameters.hashGridData.capacity);
+    uint bucketOffset;
     if (!HashGridFind(sharcParameters.hashGridData, hashGridKey, baseSlot, HASH_GRID_HASH_MAP_BUCKET_SIZE, hashGridIndex, bucketOffset))
         return false;
 
@@ -946,9 +951,9 @@ void SharcResolveEntry(uint entryIndex, SharcParameters sharcParameters, SharcRe
     {
         HashGridKey adjacentLevelHashKey = SharcGetAdjacentLevelHashKey(hashGridKey, sharcParameters.hashGridParameters, resolveParameters.cameraPositionPrev);
 
-        HashGridIndex hashGridIndex = HASH_GRID_INVALID_CACHE_INDEX;
-        uint hashCollisionsNum;
+        HashGridIndex hashGridIndex;
         uint baseSlot = HashGridGetBaseSlot(adjacentLevelHashKey, sharcParameters.hashGridData.capacity);
+        uint hashCollisionsNum;
         if (HashGridFind(sharcParameters.hashGridData, adjacentLevelHashKey, baseSlot, HASH_GRID_HASH_MAP_BUCKET_SIZE, hashGridIndex, hashCollisionsNum))
         {
             SharcPackedData adjacentPackedDataPrev = BUFFER_AT_OFFSET(sharcParameters.resolvedBuffer, hashGridIndex);
