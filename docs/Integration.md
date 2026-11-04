@@ -168,6 +168,12 @@ When directional radiance encoding is enabled, both accumulation and resolved bu
 
 Directional radiance encoding increases memory usage and accumulation cost. It should only be enabled when directional reconstruction improves quality, typically in scenes with intense specular highlights or sharp glossy paths.
 
+## Drop Reset
+
+When the lighting of a region drops sharply within one frame, for example when a light is switched off or an occluder moves in front of it without a camera cut, cached entries keep blending the new, darker frame mean with their history for up to `accumulationFrameNum` frames.
+
+This mode can be enabled by defining `SHARC_ENABLE_DROP_RESET 1`. During resolve, when the frame has at least `SHARC_DROP_RESET_SAMPLE_NUM` samples and its mean luminance falls below `SHARC_DROP_RESET_RATIO` of the accumulated luminance, the history's sample count is scaled by the drop ratio. Brightening is not affected. Radiance propagated from other cache entries still fades over the following frames.
+
 ## Parameters Selection and Debugging
 
 By default, `SHARC_PROPAGATION_DEPTH` is set to `2` when cache resampling is enabled. This value can be increased if longer paths are required to reach light sources in the scene.
