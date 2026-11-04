@@ -107,6 +107,18 @@
 #define SHARC_ENABLE_FADE_ACCELERATION          0       // boost accumulator convergence when signal amplitude is fading
 #endif
 
+#ifndef SHARC_ENABLE_DROP_RESET
+#define SHARC_ENABLE_DROP_RESET                 0       // shorten the history when the frame's radiance drops sharply
+#endif
+
+#ifndef SHARC_DROP_RESET_RATIO
+#define SHARC_DROP_RESET_RATIO                  0.25f   // frame luminance below this fraction of the accumulated luminance counts as a drop
+#endif
+
+#ifndef SHARC_DROP_RESET_SAMPLE_NUM
+#define SHARC_DROP_RESET_SAMPLE_NUM             4       // minimum number of samples in the frame before its mean is trusted
+#endif
+
 #ifndef SHARC_RESAMPLING_DEPTH_MIN
 #define SHARC_RESAMPLING_DEPTH_MIN              1       // controls minimum path depth which can be used with cache resampling
 #endif
@@ -940,6 +952,19 @@ void SharcResolveEntry(uint entryIndex, SharcParameters sharcParameters, SharcRe
             sampleNumPrev = sampleNum;
     }
 #endif // SHARC_ENABLE_FADE_ACCELERATION
+
+#if SHARC_ENABLE_DROP_RESET
+    // A sharp drop of the frame's mean (a light switched off or occluded) scales the history down by the drop ratio, so the
+    // old radiance stops dominating the blend; frames with too few samples to trust their mean are left alone
+    if (sampleNum >= SHARC_DROP_RESET_SAMPLE_NUM)
+    {
+        float lumaCur = SharcRadianceLuma(accumulatedRadiance);
+        float lumaPrev = SharcRadianceLuma(accumulatedRadiancePrev);
+        if (lumaCur < lumaPrev * SHARC_DROP_RESET_RATIO)
+            sampleNumPrev *= lumaCur / lumaPrev;
+    }
+#endif // SHARC_ENABLE_DROP_RESET
+
     float sampleTotalInv = rcp(sampleNumPrev + sampleNum);
     accumulatedRadiance = SharcAddRadianceData(SharcScaleRadianceData(accumulatedRadiancePrev, sampleNumPrev * sampleTotalInv), SharcScaleRadianceData(accumulatedRadiance, sampleNum * sampleTotalInv));
     float accumulatedSampleNum = sampleNumPrev + sampleNum;
